@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+processing/audio/
+processing/temp/
+output/shorts/
+input/videos/

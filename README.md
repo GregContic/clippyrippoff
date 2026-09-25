@@ -71,7 +71,10 @@ All tunable values live in [`config/settings.json`](config/settings.json):
 | `caption_*` | Font, size, colors, outline/shadow, wrapping, and vertical position of burned-in captions |
 | `normalize_audio` | Whether to apply loudness normalization (`loudnorm`) |
 | `reaction_keywords` | Case-insensitive transcript phrases used as reaction signals |
-| `candidate_window_*` | Seconds before/after a signal and the gap used to merge nearby signals |
+| `candidate_window_*` / `context_*` | Signal context and the gap used to merge nearby signals |
+| `boundary_continuation_gap_seconds` | Maximum speech gap treated as continuing setup or payoff |
+| `boundary_quiet_seconds` | Maximum trailing context retained after a quiet boundary |
+| `boundary_scene_transition_threshold` | Frame-difference score required to end after a completed payoff |
 | `audio_*` | RMS window, rolling-baseline, local-spike threshold, and sample rate |
 | `scene_*` | Low-resolution frame sampling and scene-change thresholds |
 | `max_candidates` | Maximum number of ranked candidates saved |
