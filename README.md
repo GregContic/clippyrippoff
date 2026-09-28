@@ -57,6 +57,48 @@ model (see `config/settings.json` → `whisper_model`) to a local cache
 (`~/.cache/whisper` by default). This requires an internet connection once;
 after that, transcription runs fully offline.
 
+## Web UI V1
+
+ClippyRipoff now includes a local web UI that wraps the existing Python engine
+instead of replacing it.
+
+### Development commands
+
+Terminal 1:
+
+```powershell
+python -m uvicorn backend.main:app --reload
+```
+
+Terminal 2:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+The frontend runs at `http://localhost:5173` and the backend API runs at
+`http://127.0.0.1:8000` by default.
+
+### Notes
+
+- Analysis and rendering run in local background threads.
+- Job status is stored in memory, so a server restart clears active jobs.
+- Source videos, transcripts, candidates, and rendered Shorts still live on the filesystem cache.
+
+### API highlights
+
+- `POST /api/videos/analyze`
+- `GET /api/videos/{video_id}`
+- `GET /api/videos/{video_id}/candidates`
+- `POST /api/videos/{video_id}/render`
+- `GET /api/renders`
+- `GET /api/library`
+- `DELETE /api/library/{filename}`
+
+The CLI scripts continue to work unchanged, including `python scripts/detect_clips.py --url "..." --top 10`.
+
 ## Configuration
 
 All tunable values live in [`config/settings.json`](config/settings.json):

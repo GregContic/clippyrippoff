@@ -1,0 +1,105 @@
+export interface AnalyzeResponse {
+  video_id: string;
+  status: string;
+  job_id?: string | null;
+  title?: string | null;
+  analysis_stage?: string | null;
+  message?: string | null;
+  candidate_count: number;
+  rendered_count: number;
+}
+
+export interface ProjectSummary {
+  video_id: string;
+  title?: string | null;
+  url?: string | null;
+  status: string;
+  analysis_stage?: string | null;
+  message?: string | null;
+  candidate_count: number;
+  rendered_count: number;
+  source_url?: string | null;
+  source_video_url?: string | null;
+  transcript_url?: string | null;
+  candidates_url?: string | null;
+  rendered_urls: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+  analysis_job_id?: string | null;
+}
+
+export interface Candidate {
+  id: number;
+  start: number;
+  end: number;
+  duration: number;
+  candidate_score: number;
+  transcript?: string | null;
+  signals: Record<string, number>;
+  audio_peak: number;
+  relative_audio_peak: number;
+  audio_level: string;
+  reaction_detected: boolean;
+  matched_keywords: string[];
+  scene_change_score: number;
+  trigger_time?: number | null;
+  trigger_types: string[];
+  start_reason?: string | null;
+  end_reason?: string | null;
+  setup_seconds?: number | null;
+  payoff_seconds?: number | null;
+  preview_url?: string | null;
+}
+
+export interface CandidateListResponse {
+  video_id: string;
+  candidates: Candidate[];
+  candidate_count: number;
+}
+
+export interface RenderJob {
+  id: string;
+  kind: string;
+  video_id?: string | null;
+  candidate_id?: number | null;
+  status: string;
+  stage?: string | null;
+  message?: string | null;
+  percent?: number | null;
+  error?: string | null;
+  output_path?: string | null;
+  output_url?: string | null;
+  result?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LibraryItem {
+  filename: string;
+  url: string;
+  size_bytes: number;
+  created_at?: string | null;
+  duration?: number | null;
+}
+
+export interface LibraryResponse {
+  items: LibraryItem[];
+}
+
+export interface Settings {
+  whisper_model: string;
+  clip_min_seconds: number;
+  clip_max_seconds: number;
+  max_candidates: number;
+  context_before_seconds?: number | null;
+  context_after_seconds?: number | null;
+  candidate_merge_gap_seconds?: number | null;
+  boundary_continuation_gap_seconds?: number | null;
+  boundary_quiet_seconds?: number | null;
+  boundary_scene_transition_threshold?: number | null;
+}
+
+export interface RenderResponse {
+  video_id: string;
+  render_job_ids: string[];
+}
