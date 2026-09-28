@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from backend.schemas import AnalyzeRequest, AnalyzeResponse, VideoListResponse, VideoSummary
+from backend.schemas import AnalyzeRequest, AnalyzeResponse, ProjectEditorState, VideoListResponse, VideoSummary
 from backend.services.analysis_service import start_analysis
 from backend.services.job_registry import job_registry
-from backend.services.project_service import list_projects, project_summary
+from backend.services.project_service import list_projects, load_editor_state, project_summary, save_editor_state
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 
@@ -30,7 +30,10 @@ def analyze_video(request: AnalyzeRequest) -> AnalyzeResponse:
 
 @router.get("/{video_id}", response_model=VideoSummary)
 def get_video(video_id: str) -> VideoSummary:
-    summary = project_summary(video_id)
+    try:
+        summary = project_summary(video_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if summary is None:
         raise HTTPException(status_code=404, detail="Video project not found.")
     return VideoSummary(**summary)
@@ -42,3 +45,19 @@ def get_video_job(video_id: str) -> dict:
         if record.video_id == video_id and record.kind == "analysis":
             return record.to_dict()
     raise HTTPException(status_code=404, detail="Analysis job not found.")
+
+
+@router.get("/{video_id}/editor-state", response_model=ProjectEditorState)
+def get_video_editor_state(video_id: str) -> ProjectEditorState:
+    payload = load_editor_state(video_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Editor state not found.")
+    return ProjectEditorState(**payload)
+
+
+@router.put("/{video_id}/editor-state", response_model=ProjectEditorState)
+def update_video_editor_state(video_id: str, request: ProjectEditorState) -> ProjectEditorState:
+    if request.video_id != video_id:
+        raise HTTPException(status_code=400, detail="Editor state video_id does not match the route.")
+    payload = save_editor_state(video_id, request.model_dump())
+    return ProjectEditorState(**payload)

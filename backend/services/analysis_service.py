@@ -51,7 +51,7 @@ def start_analysis(url: str, *, force_download: bool = False) -> AnalyzeResponse
         status = str(existing.get("status", "unknown"))
         if status == "running":
             raise RuntimeError("This video is already being analyzed.")
-        if status == "completed" and project_summary(video_id):
+        if status == "completed" and not force_download and project_summary(video_id):
             summary = project_summary(video_id) or {}
             return AnalyzeResponse(
                 video_id=video_id,

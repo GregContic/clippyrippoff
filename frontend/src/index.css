@@ -10,7 +10,7 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: #07090f;
+  background: #111318;
   font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -29,5 +29,5 @@ a {
 }
 
 ::selection {
-  background: rgba(56, 189, 248, 0.3);
+  background: rgba(59, 130, 246, 0.3);
 }

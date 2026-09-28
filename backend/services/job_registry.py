@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import json
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
+
+from scripts.utils import PROCESSING_TEMP_DIR
+
+
+JOB_ID_PATTERN = re.compile(r"^[0-9a-fA-F-]{32,36}$")
 
 
 def _now() -> str:
@@ -25,6 +33,7 @@ class JobRecord:
     output_path: str | None = None
     output_url: str | None = None
     result: dict[str, Any] | None = None
+    retry_of: str | None = None
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -42,15 +51,95 @@ class JobRecord:
             "output_path": self.output_path,
             "output_url": self.output_url,
             "result": self.result,
+            "retry_of": self.retry_of,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "JobRecord":
+        return cls(
+            id=str(payload["id"]),
+            kind=str(payload["kind"]),
+            status=str(payload.get("status", "queued")),
+            video_id=payload.get("video_id"),
+            candidate_id=payload.get("candidate_id"),
+            stage=payload.get("stage"),
+            message=payload.get("message"),
+            percent=payload.get("percent"),
+            error=payload.get("error"),
+            output_path=payload.get("output_path"),
+            output_url=payload.get("output_url"),
+            result=payload.get("result") if isinstance(payload.get("result"), dict) else None,
+            retry_of=payload.get("retry_of"),
+            created_at=str(payload.get("created_at", _now())),
+            updated_at=str(payload.get("updated_at", _now())),
+        )
 
 
 class JobRegistry:
     def __init__(self) -> None:
         self._jobs: dict[str, JobRecord] = {}
         self._lock = threading.Lock()
+        self.storage_dir = PROCESSING_TEMP_DIR / "render_jobs"
+
+    def _job_path(self, job_id: str) -> Path:
+        if not JOB_ID_PATTERN.match(job_id):
+            raise ValueError(f"Invalid job ID: {job_id}")
+        return self.storage_dir / f"{job_id}.json"
+
+    def _write_record(self, record: JobRecord) -> None:
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        path = self._job_path(record.id)
+        payload = record.to_dict()
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(path)
+
+    def _delete_record_file(self, job_id: str) -> None:
+        path = self._job_path(job_id)
+        if path.exists():
+            path.unlink()
+
+    def _store(self, record: JobRecord) -> JobRecord:
+        with self._lock:
+            self._jobs[record.id] = record
+            self._write_record(record)
+        return record
+
+    def _persist(self, record: JobRecord) -> None:
+        with self._lock:
+            self._write_record(record)
+
+    def _load_file(self, path: Path) -> JobRecord | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or "id" not in payload or "kind" not in payload:
+            return None
+        try:
+            return JobRecord.from_dict(payload)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def restore_from_disk(self) -> None:
+        restored: dict[str, JobRecord] = {}
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        for path in self.storage_dir.glob("*.json"):
+            record = self._load_file(path)
+            if record is None:
+                continue
+            if record.status in {"queued", "running"}:
+                record.status = "interrupted"
+                record.stage = "interrupted"
+                record.message = "Interrupted by backend restart."
+                record.updated_at = _now()
+            restored[record.id] = record
+        with self._lock:
+            self._jobs = restored
+            for record in restored.values():
+                self._write_record(record)
 
     def create(
         self,
@@ -60,6 +149,8 @@ class JobRegistry:
         candidate_id: int | None = None,
         stage: str | None = None,
         message: str | None = None,
+        result: dict[str, Any] | None = None,
+        retry_of: str | None = None,
     ) -> JobRecord:
         record = JobRecord(
             id=str(uuid.uuid4()),
@@ -68,10 +159,10 @@ class JobRegistry:
             candidate_id=candidate_id,
             stage=stage,
             message=message,
+            result=result,
+            retry_of=retry_of,
         )
-        with self._lock:
-            self._jobs[record.id] = record
-        return record
+        return self._store(record)
 
     def update(self, job_id: str, **changes: Any) -> JobRecord:
         with self._lock:
@@ -79,6 +170,7 @@ class JobRegistry:
             for key, value in changes.items():
                 setattr(record, key, value)
             record.updated_at = _now()
+            self._write_record(record)
             return record
 
     def get(self, job_id: str) -> JobRecord | None:
@@ -91,7 +183,10 @@ class JobRegistry:
 
     def remove(self, job_id: str) -> bool:
         with self._lock:
-            return self._jobs.pop(job_id, None) is not None
+            removed = self._jobs.pop(job_id, None) is not None
+            if removed:
+                self._delete_record_file(job_id)
+            return removed
 
     def reset(self) -> None:
         with self._lock:

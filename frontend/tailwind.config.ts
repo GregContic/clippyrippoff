@@ -9,22 +9,39 @@ export default {
       },
       colors: {
         surface: {
-          950: '#07090f',
-          900: '#0d111a',
-          800: '#151b27',
-          700: '#1f2937',
+          950: '#111318',
+          900: '#171a21',
+          800: '#1b1f27',
+          700: '#222733',
+          600: '#303642',
         },
         accent: {
-          300: '#7dd3fc',
-          400: '#38bdf8',
-          500: '#0ea5e9',
+          300: '#93c5fd',
+          400: '#60a5fa',
+          500: '#3b82f6',
+        },
+        success: {
+          100: '#dcfce7',
+          200: '#bbf7d0',
+          500: '#22c55e',
+        },
+        warning: {
+          100: '#fef3c7',
+          200: '#fde68a',
+          500: '#f59e0b',
+        },
+        danger: {
+          100: '#fee2e2',
+          200: '#fecaca',
+          500: '#ef4444',
         },
       },
       boxShadow: {
-        glow: '0 0 0 1px rgba(125, 211, 252, 0.16), 0 18px 60px rgba(2, 8, 23, 0.55)',
+        subtle: '0 1px 2px rgba(0, 0, 0, 0.2), 0 12px 28px rgba(0, 0, 0, 0.18)',
       },
-      backgroundImage: {
-        'app-radial': 'radial-gradient(circle at top, rgba(14, 165, 233, 0.12), transparent 40%), radial-gradient(circle at right, rgba(56, 189, 248, 0.08), transparent 24%)',
+      borderRadius: {
+        xl: '0.875rem',
+        '2xl': '1rem',
       },
     },
   },

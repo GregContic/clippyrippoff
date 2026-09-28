@@ -13,11 +13,26 @@ export interface ProjectSummary {
   video_id: string;
   title?: string | null;
   url?: string | null;
+  source_thumbnail_url?: string | null;
   status: string;
   analysis_stage?: string | null;
   message?: string | null;
   candidate_count: number;
   rendered_count: number;
+  source_duration?: number | null;
+  source_cache_status?: string | null;
+  project_created_at?: string | null;
+  last_analyzed_at?: string | null;
+  latest_activity_at?: string | null;
+  saved_editing_state?: boolean;
+  manual_trim_count?: number;
+  render_job_count?: number;
+  queued_render_jobs?: number;
+  running_render_jobs?: number;
+  completed_render_jobs?: number;
+  failed_render_jobs?: number;
+  interrupted_render_jobs?: number;
+  generated_output_count?: number;
   source_url?: string | null;
   source_video_url?: string | null;
   transcript_url?: string | null;
@@ -49,10 +64,41 @@ export interface Candidate {
   setup_seconds?: number | null;
   payoff_seconds?: number | null;
   preview_url?: string | null;
+  trim_start?: number | null;
+  trim_end?: number | null;
+  trim_saved?: boolean;
+}
+
+export interface CaptionSegmentEdit {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface RenderSettings {
+  output_width?: number | null;
+  output_height?: number | null;
+  fps?: number | null;
+  captions_enabled?: boolean | null;
+  normalize_audio?: boolean | null;
+}
+
+export interface CandidateEditorState {
+  trim?: { start: number; end: number } | null;
+  caption_segments: CaptionSegmentEdit[];
+  render_settings: RenderSettings;
+  selected: boolean;
+}
+
+export interface ProjectEditorState {
+  video_id: string;
+  selected_candidate_id?: number | null;
+  candidates: Record<string, CandidateEditorState>;
 }
 
 export interface CandidateListResponse {
   video_id: string;
+  source_duration?: number | null;
   candidates: Candidate[];
   candidate_count: number;
 }
@@ -62,6 +108,7 @@ export interface RenderJob {
   kind: string;
   video_id?: string | null;
   candidate_id?: number | null;
+  retry_of?: string | null;
   status: string;
   stage?: string | null;
   message?: string | null;
@@ -86,6 +133,20 @@ export interface LibraryResponse {
   items: LibraryItem[];
 }
 
+export interface ProjectFileItem {
+  filename: string;
+  url: string;
+  size_bytes: number;
+  created_at?: string | null;
+  duration?: number | null;
+  candidate_id?: number | null;
+  render_job_id?: string | null;
+}
+
+export interface ProjectFilesResponse {
+  items: ProjectFileItem[];
+}
+
 export interface Settings {
   whisper_model: string;
   clip_min_seconds: number;
@@ -97,9 +158,18 @@ export interface Settings {
   boundary_continuation_gap_seconds?: number | null;
   boundary_quiet_seconds?: number | null;
   boundary_scene_transition_threshold?: number | null;
+  output_width?: number | null;
+  output_height?: number | null;
+  fps?: number | null;
+  normalize_audio?: boolean | null;
 }
 
 export interface RenderResponse {
   video_id: string;
   render_job_ids: string[];
+}
+
+export interface TrimOverride {
+  start: number;
+  end: number;
 }

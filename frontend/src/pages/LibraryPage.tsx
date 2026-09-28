@@ -28,7 +28,7 @@ export function LibraryPage() {
 
   return (
     <div className="space-y-5">
-      {error ? <Card className="border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</Card> : null}
+      {error ? <Card className="border-danger-500/30 bg-danger-500/10 p-4 text-sm text-danger-100">{error}</Card> : null}
       <LibraryGrid items={items} onDelete={(filename) => { void handleDelete(filename); }} />
     </div>
   );

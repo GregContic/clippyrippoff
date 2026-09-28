@@ -1,15 +1,30 @@
 import { Route, Routes, useLocation } from 'react-router-dom';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
-import { DashboardPage } from './pages/DashboardPage';
+import { Button } from './components/ui';
 import { AnalyzePage } from './pages/AnalyzePage';
+import { DashboardPage } from './pages/DashboardPage';
 import { RendersPage } from './pages/RendersPage';
 import { LibraryPage } from './pages/LibraryPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { ProjectsPage } from './pages/ProjectsPage';
+import { ProjectWorkspacePage } from './pages/ProjectWorkspacePage';
 
 function useRouteTitle(pathname: string) {
+  if (pathname === '/' || pathname === '') {
+    return { title: 'Dashboard', subtitle: 'Workspace overview, recent projects, and next actions.' };
+  }
+  if (pathname === '/projects') {
+    return { title: 'Projects', subtitle: 'Browse analyzed videos and open any project workspace.' };
+  }
+  if (pathname === '/analyze') {
+    return { title: 'Analysis', subtitle: 'Start a new analysis job from a supported video URL.' };
+  }
+  if (pathname.startsWith('/projects/')) {
+    return { title: 'Project Workspace', subtitle: 'Manage candidates, renders, and files for one video.' };
+  }
   if (pathname.startsWith('/analyze/')) {
-    return { title: 'Analysis', subtitle: 'Review candidates and render selected clips.' };
+    return { title: 'Project Workspace', subtitle: 'Review candidates and render selected clips.' };
   }
   if (pathname.startsWith('/renders')) {
     return { title: 'Render Queue', subtitle: 'Track local render jobs and finished Shorts.' };
@@ -20,7 +35,7 @@ function useRouteTitle(pathname: string) {
   if (pathname.startsWith('/settings')) {
     return { title: 'Settings', subtitle: 'Read-only project configuration for V1.' };
   }
-  return { title: 'Dashboard', subtitle: 'Paste a YouTube URL and start a local analysis.' };
+  return { title: 'Projects', subtitle: 'Paste a YouTube URL and manage your local video workspaces.' };
 }
 
 export function App() {
@@ -28,15 +43,22 @@ export function App() {
   const route = useRouteTitle(location.pathname);
 
   return (
-    <div className="min-h-screen bg-surface-950 text-slate-100 bg-app-radial">
+    <div className="min-h-screen bg-surface-950 text-slate-100">
       <div className="flex min-h-screen">
         <Sidebar />
         <div className="flex min-w-0 flex-1 flex-col">
-          <TopBar title={route.title} subtitle={route.subtitle} />
+          <TopBar
+            title={route.title}
+            subtitle={route.subtitle}
+            actions={location.pathname.startsWith('/projects/') || location.pathname.startsWith('/analyze/') ? <Button type="button" variant="secondary" onClick={() => window.history.back()}>Back</Button> : undefined}
+          />
           <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
             <div className="mx-auto w-full max-w-7xl">
               <Routes>
                 <Route path="/" element={<DashboardPage />} />
+                <Route path="/projects" element={<ProjectsPage />} />
+                <Route path="/projects/:videoId" element={<ProjectWorkspacePage />} />
+                <Route path="/analyze" element={<AnalyzePage />} />
                 <Route path="/analyze/:videoId" element={<AnalyzePage />} />
                 <Route path="/renders" element={<RendersPage />} />
                 <Route path="/library" element={<LibraryPage />} />

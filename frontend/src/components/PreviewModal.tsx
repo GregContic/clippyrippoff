@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { Candidate } from '../api/types';
+import { resolveMediaUrl } from '../api/client';
 import { formatClock } from '../lib/format';
 import { Button, Card } from './ui';
 
@@ -32,13 +33,15 @@ export function PreviewModal({
     return null;
   }
 
+  const resolvedPreviewUrl = resolveMediaUrl(previewUrl);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm" onClick={onClose} role="presentation">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-surface-950/90 p-4" onClick={onClose} role="presentation">
       <Card className="w-full max-w-4xl overflow-hidden" onClick={(event) => event.stopPropagation()}>
         <div className="grid gap-0 lg:grid-cols-[1.4fr_1fr]">
-          <div className="bg-black">
-            {previewUrl ? (
-              <video ref={videoRef} src={previewUrl} controls className="h-full w-full max-h-[70vh] bg-black object-contain" />
+          <div className="bg-surface-950">
+            {resolvedPreviewUrl ? (
+              <video ref={videoRef} src={resolvedPreviewUrl} controls className="h-full w-full max-h-[70vh] bg-surface-950 object-contain" />
             ) : (
               <div className="flex min-h-[40vh] items-center justify-center text-sm text-slate-500">Preview unavailable</div>
             )}

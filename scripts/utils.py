@@ -178,6 +178,8 @@ def validate_clip_range(
     video_duration: float | None = None,
 ) -> None:
     """Validate a start/end clip range, raising ValidationError on any problem."""
+    if start < 0:
+        raise ValidationError(f"Start timestamp ({start}s) cannot be negative.")
     if end <= start:
         raise ValidationError(
             f"End timestamp ({end}s) must be after start timestamp ({start}s)."

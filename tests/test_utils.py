@@ -44,6 +44,10 @@ class TestValidateClipRange(unittest.TestCase):
     def test_valid_range(self):
         validate_clip_range(10, 30, min_seconds=10, max_seconds=60)  # should not raise
 
+    def test_negative_start(self):
+        with self.assertRaises(ValidationError):
+            validate_clip_range(-1, 10, min_seconds=10, max_seconds=60)
+
     def test_end_before_start(self):
         with self.assertRaises(ValidationError):
             validate_clip_range(30, 10, min_seconds=10, max_seconds=60)

@@ -28,13 +28,13 @@ export function AnalysisProgress({ stage, message, status }: { stage?: string | 
           const isActive = index === currentIndex && stage !== 'complete';
           return (
             <div key={step.key} className="flex items-center gap-3">
-              <div className={`h-2.5 w-2.5 rounded-full ${isComplete ? 'bg-cyan-400' : isActive ? 'bg-sky-300 shadow-[0_0_0_6px_rgba(56,189,248,0.14)]' : 'bg-slate-600'}`} />
+              <div className={`h-2.5 w-2.5 rounded-full ${isComplete ? 'bg-accent-400' : isActive ? 'bg-accent-300' : 'bg-slate-600'}`} />
               <div className="flex-1">
                 <div className="flex items-center justify-between text-sm">
                   <span className={isActive || isComplete ? 'text-white' : 'text-slate-400'}>{step.label}</span>
                   <span className="text-xs text-slate-500">{isComplete ? 'Done' : isActive ? 'Active' : 'Pending'}</span>
                 </div>
-                {isActive ? <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800"><div className="h-full w-1/2 animate-pulse rounded-full bg-gradient-to-r from-sky-400 to-cyan-300" /></div> : null}
+                {isActive ? <div className="mt-2 h-2 overflow-hidden rounded-full bg-surface-800"><div className="h-full w-1/2 rounded-full bg-accent-500" /></div> : null}
               </div>
             </div>
           );

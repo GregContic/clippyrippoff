@@ -1,5 +1,5 @@
 import type { Candidate } from '../api/types';
-import { Button, EmptyState } from './ui';
+import { Button, Card, EmptyState } from './ui';
 import { CandidateCard } from './CandidateCard';
 
 export function CandidateGrid({
@@ -9,8 +9,10 @@ export function CandidateGrid({
   onSelectAll,
   onClear,
   onPreview,
+  onEdit,
   onRender,
   busy,
+  renderStatusById,
 }: {
   candidates: Candidate[];
   selectedIds: number[];
@@ -18,8 +20,10 @@ export function CandidateGrid({
   onSelectAll: () => void;
   onClear: () => void;
   onPreview: (candidate: Candidate) => void;
+  onEdit: (candidate: Candidate) => void;
   onRender: () => void;
   busy?: boolean;
+  renderStatusById?: Record<number, string | null | undefined>;
 }) {
   if (!candidates.length) {
     return <EmptyState title="No candidates yet" description="The existing detector has not returned any clip suggestions for this video." />;
@@ -27,9 +31,9 @@ export function CandidateGrid({
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-900/80 p-4 sm:flex-row sm:items-center sm:justify-between">
+      <Card className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div className="text-lg font-semibold text-white">{candidates.length} candidates found</div>
+          <div className="text-base font-semibold text-white">{candidates.length} candidates found</div>
           <div className="text-sm text-slate-400">Select clips to render locally on this machine.</div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -39,7 +43,7 @@ export function CandidateGrid({
             Render Selected ({selectedIds.length})
           </Button>
         </div>
-      </div>
+      </Card>
 
       <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
         {candidates.map((candidate) => (
@@ -49,6 +53,8 @@ export function CandidateGrid({
             selected={selectedIds.includes(candidate.id)}
             onToggle={() => onToggle(candidate.id)}
             onPreview={() => onPreview(candidate)}
+            onEdit={() => onEdit(candidate)}
+            renderStatus={renderStatusById?.[candidate.id] ?? null}
           />
         ))}
       </div>

@@ -64,38 +64,77 @@ instead of replacing it.
 
 ### Development commands
 
+Recommended on Windows:
+
+```powershell
+.\start.ps1
+```
+
+The launcher starts the FastAPI backend in one PowerShell window, the Vite frontend in another, waits for both HTTP endpoints to respond, and then opens Firefox to `http://127.0.0.1:5173`.
+
+If you want to run the services manually, use these commands from the repository root:
+
 Terminal 1:
 
 ```powershell
-python -m uvicorn backend.main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 Terminal 2:
 
 ```powershell
 cd frontend
-npm install
 npm run dev
 ```
 
-The frontend runs at `http://localhost:5173` and the backend API runs at
-`http://127.0.0.1:8000` by default.
+The frontend runs at `http://127.0.0.1:5173` and the backend API runs at
+`http://127.0.0.1:8000` by default. The frontend Vite config binds to
+`127.0.0.1` directly, so no extra host flags are required.
+
+If a clean checkout is missing dependencies, install them once with:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+cd frontend
+npm install
+```
+
+Troubleshooting:
+
+- If the launcher reports that port 8000 or 5173 is already in use, stop the existing local server or close the old window before retrying.
+- If the backend cannot import Uvicorn, confirm you are using the repo's `.venv` and reinstall `requirements.txt`.
+- If the frontend does not open in Firefox, check whether `firefox.exe` is on PATH; the launcher falls back to the default browser if needed.
 
 ### Notes
 
 - Analysis and rendering run in local background threads.
-- Job status is stored in memory, so a server restart clears active jobs.
+- Job status is persisted to disk, so completed, failed, and interrupted render jobs survive restarts.
+- Jobs that were queued or running during a restart are restored as interrupted and can be retried from the queue.
 - Source videos, transcripts, candidates, and rendered Shorts still live on the filesystem cache.
+- Candidate cards now include a trim editor for manual start/end adjustments before rendering.
+- Manual trims are stored in a project-only sidecar file and do not modify `candidates.json`.
+- Render jobs can use either the saved trim or a one-off override from the editor; the chosen boundaries are kept with that render job, along with the render settings snapshot used for retries.
 
 ### API highlights
 
 - `POST /api/videos/analyze`
 - `GET /api/videos/{video_id}`
 - `GET /api/videos/{video_id}/candidates`
+- `PUT /api/videos/{video_id}/candidates/{candidate_id}/trim`
 - `POST /api/videos/{video_id}/render`
 - `GET /api/renders`
 - `GET /api/library`
 - `DELETE /api/library/{filename}`
+
+### Manual trim workflow
+
+Open a project on the Analysis page and click **Trim** on any candidate card. The editor shows the AI-detected boundaries, the current manual boundaries, candidate metadata, and a preview of the cached source video.
+
+Use the start/end time fields to adjust the clip. The editor enforces the configured `clip_min_seconds` and `clip_max_seconds`, requires `end > start`, and rejects values outside the known source duration when that duration is available.
+
+Click **Save Trim** to store the clip boundaries for that candidate in the current project only. Click **Render This Clip** to render immediately with the current boundaries without changing the detector output. Clicking **Reset to AI boundaries** restores the original candidate start/end.
 
 The CLI scripts continue to work unchanged, including `python scripts/detect_clips.py --url "..." --top 10`.
 

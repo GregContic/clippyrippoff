@@ -7,9 +7,11 @@ from fastapi.staticfiles import StaticFiles
 from backend.core import PROJECT_ROOT  # noqa: F401 - ensures scripts/ is on sys.path
 from backend.api.candidates import router as candidates_router
 from backend.api.library import router as library_router
+from backend.api.projects import router as projects_router
 from backend.api.renders import router as renders_router
 from backend.api.settings import router as settings_router
 from backend.api.videos import router as videos_router
+from backend.services.job_registry import job_registry
 from scripts.utils import OUTPUT_SHORTS_DIR, PROCESSING_TEMP_DIR, ensure_directories
 
 app = FastAPI(title="ClippyRipoff API", version="1.0.0")
@@ -23,6 +25,7 @@ app.add_middleware(
 )
 
 app.include_router(videos_router)
+app.include_router(projects_router)
 app.include_router(candidates_router)
 app.include_router(renders_router)
 app.include_router(library_router)
@@ -32,6 +35,7 @@ app.include_router(settings_router)
 @app.on_event("startup")
 def _startup() -> None:
     ensure_directories()
+    job_registry.restore_from_disk()
 
 
 app.mount(
