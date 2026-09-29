@@ -19,6 +19,9 @@ export function RenderQueue({
       {jobs.map((job) => {
         const openUrl = resolveMediaUrl(job.output_url ?? (job.output_path ? `/media/shorts/${job.output_path.split(/[/\\]/).pop() ?? ''}` : null));
         const snapshot = job.result && typeof job.result === 'object' ? (job.result as { request_signature?: any }).request_signature : null;
+        const rawPercent = Number(job.percent);
+        const hasProgress = Number.isFinite(rawPercent);
+        const progress = job.status === 'completed' ? 100 : hasProgress ? Math.max(0, Math.min(99, rawPercent)) : null;
         return (
           <Card key={job.id} className="p-5">
             <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -62,8 +65,11 @@ export function RenderQueue({
               </div>
             </div>
 
-            <div className="mt-4 h-2 overflow-hidden rounded-full bg-surface-800">
-              <div className={`h-full rounded-full ${job.status === 'running' ? 'bg-warning-500' : job.status === 'completed' ? 'bg-success-500' : job.status === 'failed' || job.status === 'interrupted' ? 'bg-danger-500' : 'bg-accent-500'}`} style={{ width: job.percent != null ? `${Math.max(0, Math.min(100, job.percent))}%` : '100%' }} aria-hidden="true" />
+            <div className="mt-4 flex items-center gap-3">
+              <div className="h-2 flex-1 overflow-hidden rounded-full bg-surface-800">
+                <div className={`h-full rounded-full ${job.status === 'running' ? 'bg-warning-500' : job.status === 'completed' ? 'bg-success-500' : job.status === 'failed' || job.status === 'interrupted' ? 'bg-danger-500' : 'bg-accent-500'} ${progress == null ? 'w-1/3 opacity-70' : ''}`} style={progress == null ? undefined : { width: `${progress}%` }} aria-hidden="true" />
+              </div>
+              {progress != null ? <span className="w-10 text-right text-xs tabular-nums text-slate-400">{Math.round(progress)}%</span> : <span className="text-xs text-slate-500">Progress unavailable</span>}
             </div>
           </Card>
         );

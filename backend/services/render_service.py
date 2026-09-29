@@ -203,6 +203,7 @@ def submit_renders(
             message="Waiting",
             result={"request_signature": request_signature},
             retry_of=retry_of,
+            percent=0.0,
         )
 
         def _runner(job_id: str, selected_candidate: dict = candidate, trim_override: object | None = selected_override, selected_state: dict = candidate_state, selected_config: dict = effective_config, signature: dict = request_signature) -> None:
@@ -230,8 +231,21 @@ def submit_renders(
                     ass_path = PROCESSING_TEMP_DIR / f"{video_id}_{candidate_id}.ass"
                     write_ass_subtitles(cues, selected_config, ass_path)
                 output_path = generate_output_filename(OUTPUT_SHORTS_DIR)
-                job_registry.update(job_id, status="running", stage="rendering", message="Rendering captions...")
-                render_short(source_path_local, start, end, selected_config, ass_path, output_path)
+                expected_duration = max(end - start, 0.001)
+
+                def on_progress(progress: dict[str, str]) -> None:
+                    raw_time = progress.get("out_time_us") or progress.get("out_time_ms")
+                    if raw_time in (None, "N/A"):
+                        return
+                    try:
+                        rendered_seconds = float(raw_time) / 1_000_000
+                    except (TypeError, ValueError):
+                        return
+                    percent = min(99.0, max(0.0, rendered_seconds / expected_duration * 100.0))
+                    job_registry.update(job_id, percent=percent)
+
+                job_registry.update(job_id, status="running", stage="rendering", message="Rendering captions...", percent=0.0)
+                render_short(source_path_local, start, end, selected_config, ass_path, output_path, progress_callback=on_progress)
                 problems = verify_output(output_path, selected_config, expected_duration=end - start)
                 if problems:
                     raise RuntimeError("; ".join(problems))
@@ -250,6 +264,7 @@ def submit_renders(
                     message="Complete",
                     output_path=str(output_path),
                     output_url=f"/media/shorts/{output_path.name}",
+                    percent=100.0,
                     result={"request_signature": signature, "start": start, "end": end, "render_settings": signature["render_settings"]},
                 )
             except Exception as exc:

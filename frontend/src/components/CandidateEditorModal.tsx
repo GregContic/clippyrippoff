@@ -44,16 +44,7 @@ function buildDefaultCandidateState(candidate: Candidate): CandidateEditorState 
   };
 }
 
-export function CandidateEditorModal({
-  videoId,
-  candidate,
-  previewUrl,
-  transcriptUrl,
-  sourceDuration,
-  onClose,
-  onSavedTrim,
-  onRender,
-}: {
+type CandidateEditorModalProps = {
   videoId: string;
   candidate: Candidate | null;
   previewUrl?: string | null;
@@ -62,7 +53,25 @@ export function CandidateEditorModal({
   onClose: () => void;
   onSavedTrim: (candidate: Candidate, start: number, end: number) => void;
   onRender: (candidate: Candidate, start: number, end: number, state: CandidateEditorState) => Promise<void>;
-}) {
+};
+
+export function CandidateEditorModal(props: CandidateEditorModalProps) {
+  if (!props.candidate) {
+    return null;
+  }
+  return <CandidateEditorModalContent {...props} candidate={props.candidate} />;
+}
+
+function CandidateEditorModalContent({
+  videoId,
+  candidate,
+  previewUrl,
+  transcriptUrl,
+  sourceDuration,
+  onClose,
+  onSavedTrim,
+  onRender,
+}: CandidateEditorModalProps & { candidate: Candidate }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [editorState, setEditorState] = useState<ProjectEditorState | null>(null);
@@ -145,10 +154,6 @@ export function CandidateEditorModal({
       active = false;
     };
   }, [candidate, transcriptUrl, videoId]);
-
-  if (!candidate) {
-    return null;
-  }
 
   const selectedCandidate = candidate;
 

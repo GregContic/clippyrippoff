@@ -208,31 +208,32 @@ export function ProjectWorkspacePage() {
     <div className="space-y-6">
       <Card className="overflow-hidden p-0">
         <div className="grid gap-0 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="p-6 sm:p-8">
+          <div className="min-w-0 p-5 sm:p-6">
             <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.22em] text-slate-500">
               <span>{project.source_cache_status ?? 'cache unknown'}</span>
               <span>•</span>
               <span>{project.video_id}</span>
             </div>
             <div className="mt-3 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div className="space-y-2">
-                <h2 className="text-3xl font-semibold tracking-tight text-white">{project.title ?? project.video_id}</h2>
+              <div className="min-w-0 space-y-2">
+                <h2 className="break-words text-2xl font-semibold tracking-tight text-white sm:text-3xl">{project.title ?? project.video_id}</h2>
                 <p className="max-w-2xl text-sm leading-6 text-slate-400">{project.message ?? 'Local project workspace for candidates, renders, and generated clips.'}</p>
-                <div className="flex flex-wrap gap-2 text-xs text-slate-400">
-                  <span className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1">Candidates: {project.candidate_count}</span>
-                  <span className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1">Rendered: {project.rendered_count}</span>
-                  <span className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1">Source: {project.source_duration != null ? formatDuration(project.source_duration) : 'unknown'}</span>
-                  <span className="rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1">Manual trims: {project.manual_trim_count ?? 0}</span>
-                </div>
+                <dl className="grid max-w-2xl grid-cols-2 gap-x-5 gap-y-2 text-xs sm:grid-cols-4">
+                  <div><dt className="text-slate-500">Status</dt><dd className="mt-0.5 truncate text-slate-200">{project.status}</dd></div>
+                  <div><dt className="text-slate-500">Candidates</dt><dd className="mt-0.5 text-slate-200">{project.candidate_count}</dd></div>
+                  <div><dt className="text-slate-500">Rendered</dt><dd className="mt-0.5 text-slate-200">{project.rendered_count}</dd></div>
+                  <div><dt className="text-slate-500">Source duration</dt><dd className="mt-0.5 text-slate-200">{project.source_duration != null ? formatDuration(project.source_duration) : 'unknown'}</dd></div>
+                  <div><dt className="text-slate-500">Manual trims</dt><dd className="mt-0.5 text-slate-200">{project.manual_trim_count ?? 0}</dd></div>
+                </dl>
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex shrink-0 flex-wrap gap-2 sm:max-w-[15rem] sm:justify-end">
                 <Button type="button" variant="secondary" onClick={() => navigate('/')}>Back to Projects</Button>
                 <Button type="button" variant="secondary" onClick={() => void handleAnalyze(false)} disabled={busyAction === 'analyze'}>Analyze</Button>
                 <Button type="button" onClick={() => void handleAnalyze(true)} disabled={busyAction === 'analyze'}>Re-analyze</Button>
               </div>
             </div>
 
-            <div className="mt-5 flex flex-wrap gap-3 text-sm text-slate-400">
+            <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-slate-400">
               {project.url ? <a href={project.url} target="_blank" rel="noreferrer" className="text-sky-300 underline decoration-sky-400/50 underline-offset-4">Open source on YouTube</a> : <span>Original URL unavailable</span>}
               {project.latest_activity_at ? <span>Latest activity {formatDate(project.latest_activity_at)}</span> : null}
               {project.project_created_at ? <span>Created {formatDate(project.project_created_at)}</span> : null}
@@ -240,15 +241,15 @@ export function ProjectWorkspacePage() {
             </div>
           </div>
 
-          <div className="border-t border-slate-800 bg-slate-950/60 p-6 lg:border-l lg:border-t-0">
+          <div className="border-t border-slate-800 bg-slate-950/60 p-4 lg:border-l lg:border-t-0">
             {project.source_thumbnail_url ? (
-              <div className="overflow-hidden rounded-3xl border border-slate-800 bg-black">
-                <img src={resolveMediaUrl(project.source_thumbnail_url) ?? project.source_thumbnail_url} alt={project.title ?? project.video_id} className="h-52 w-full object-cover" />
+              <div className="aspect-video overflow-hidden rounded-2xl border border-slate-800 bg-black">
+                <img src={resolveMediaUrl(project.source_thumbnail_url) ?? project.source_thumbnail_url} alt={project.title ?? project.video_id} className="h-full w-full object-cover" />
               </div>
             ) : (
-              <div className="flex h-52 items-center justify-center rounded-3xl border border-dashed border-slate-800 bg-slate-950/60 text-sm uppercase tracking-[0.24em] text-slate-500">No thumbnail available</div>
+              <div className="flex aspect-video items-center justify-center rounded-2xl border border-dashed border-slate-800 bg-slate-950/60 text-sm uppercase tracking-[0.24em] text-slate-500">No thumbnail available</div>
             )}
-            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
               <MetricCard label="Queued / Running" value={String(queuedRenderJobs.length)} />
               <MetricCard label="Failed / Interrupted" value={String(failedRenderJobs.length + interruptedRenderJobs.length)} />
               <MetricCard label="Completed renders" value={String(completedRenderJobs.length)} />

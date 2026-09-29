@@ -2,6 +2,7 @@ import json
 import tempfile
 import time
 import unittest
+from threading import Event
 from pathlib import Path
 from unittest.mock import patch
 
@@ -150,6 +151,23 @@ class TestBackendApi(unittest.TestCase):
         self.assertEqual(payload["candidates"][0]["id"], 1)
         self.assertIsNotNone(payload["candidates"][0]["preview_url"])
 
+    def test_project_summary_generates_and_exposes_cached_thumbnail(self) -> None:
+        project_dir = self._create_project()
+
+        def fake_thumbnail_command(args, description):
+            Path(args[-1]).write_bytes(b"thumbnail")
+
+        with patch.object(project_service, "run_subprocess", side_effect=fake_thumbnail_command):
+            response = self.client.get("/api/projects/abc123XYZ_1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["source_thumbnail_url"], "/media/cache/abc123XYZ_1/thumbnail.jpg")
+        self.assertTrue((project_dir / "thumbnail.jpg").exists())
+
+        second_response = self.client.get("/api/projects/abc123XYZ_1")
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(second_response.json()["source_thumbnail_url"], "/media/cache/abc123XYZ_1/thumbnail.jpg")
+
     def test_project_listing_and_details_include_workspace_summary(self) -> None:
         self._create_project()
         save_response = self.client.put(
@@ -176,7 +194,7 @@ class TestBackendApi(unittest.TestCase):
     def test_project_render_and_file_routes_are_scoped_to_the_project(self) -> None:
         self._create_project()
 
-        def fake_render_short(source_path, start, end, config, ass_path, output_path):
+        def fake_render_short(source_path, start, end, config, ass_path, output_path, progress_callback=None):
             output_path.write_bytes(b"rendered")
 
         with patch.object(render_service, "render_short", side_effect=fake_render_short), patch.object(render_service, "verify_output", return_value=[]):
@@ -268,11 +286,11 @@ class TestBackendApi(unittest.TestCase):
         self._create_project()
         captured: list[tuple[float, float, str | None]] = []
 
-        def fake_render_short(source_path, start, end, config, ass_path, output_path):
+        def fake_render_short(source_path, start, end, config, ass_path, output_path, progress_callback=None):
             captured.append((start, end, str(ass_path) if ass_path is not None else None))
             output_path.write_bytes(b"rendered")
 
-        with patch.object(render_service, "render_short", side_effect=fake_render_short):
+        with patch.object(render_service, "render_short", side_effect=fake_render_short), patch.object(render_service, "verify_output", return_value=[]):
             response = self.client.post(
                 "/api/videos/abc123XYZ_1/render",
                 json={"candidate_ids": [1], "overrides": {"1": {"start": 14.0, "end": 26.0}}},
@@ -288,7 +306,7 @@ class TestBackendApi(unittest.TestCase):
         self._create_project()
         captured: list[tuple[dict, str | None, float, float]] = []
 
-        def fake_render_short(source_path, start, end, config, ass_path, output_path):
+        def fake_render_short(source_path, start, end, config, ass_path, output_path, progress_callback=None):
             captured.append((config, str(ass_path) if ass_path is not None else None, start, end))
             output_path.write_bytes(b"rendered")
 
@@ -308,7 +326,7 @@ class TestBackendApi(unittest.TestCase):
             },
         )
 
-        with patch.object(render_service, "render_short", side_effect=fake_render_short):
+        with patch.object(render_service, "render_short", side_effect=fake_render_short), patch.object(render_service, "verify_output", return_value=[]):
             response = self.client.post("/api/videos/abc123XYZ_1/render", json={"candidate_ids": [1]})
 
             self.assertEqual(response.status_code, 200)
@@ -327,7 +345,7 @@ class TestBackendApi(unittest.TestCase):
         self._create_project()
         captured: list[tuple[float, float]] = []
 
-        def fake_render_short(source_path, start, end, config, ass_path, output_path):
+        def fake_render_short(source_path, start, end, config, ass_path, output_path, progress_callback=None):
             captured.append((start, end))
             output_path.write_bytes(b"rendered")
 
@@ -338,6 +356,32 @@ class TestBackendApi(unittest.TestCase):
             self._wait_for(lambda: bool(captured))
             self._wait_for_job_completion(response.json()["render_job_ids"][0])
             self.assertEqual(captured[0], (12.0, 24.0))
+
+    def test_running_render_persists_time_based_progress_before_completion(self) -> None:
+        self._create_project()
+        started = Event()
+        release = Event()
+
+        def fake_render_short(source_path, start, end, config, ass_path, output_path, progress_callback=None):
+            self.assertIsNotNone(progress_callback)
+            progress_callback({"out_time_us": "4200000"})
+            started.set()
+            release.wait(timeout=2)
+            output_path.write_bytes(b"rendered")
+
+        with patch.object(render_service, "render_short", side_effect=fake_render_short), patch.object(render_service, "verify_output", return_value=[]):
+            response = self.client.post("/api/videos/abc123XYZ_1/render", json={"candidate_ids": [1]})
+            self.assertEqual(response.status_code, 200)
+            job_id = response.json()["render_job_ids"][0]
+            self.assertTrue(started.wait(timeout=2))
+            running = self.client.get(f"/api/renders/{job_id}").json()
+            self.assertEqual(running["status"], "running")
+            self.assertAlmostEqual(running["percent"], 35.0)
+            release.set()
+            self._wait_for_job_completion(job_id)
+
+        completed = self.client.get(f"/api/renders/{job_id}").json()
+        self.assertEqual(completed["percent"], 100.0)
 
     def test_render_validation_rejects_invalid_trim_values(self) -> None:
         self._create_project()
@@ -487,7 +531,7 @@ class TestBackendApi(unittest.TestCase):
         )
         job_registry.update(original.id, status="failed", error="Render failed")
 
-        def fake_render_short(source_path, start, end, config, ass_path, output_path):
+        def fake_render_short(source_path, start, end, config, ass_path, output_path, progress_callback=None):
             output_path.write_bytes(b"rendered")
 
         with patch.object(render_service, "render_short", side_effect=fake_render_short):

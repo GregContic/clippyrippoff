@@ -14,6 +14,7 @@ import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from utils import (
     FFmpegNotFoundError,
@@ -28,6 +29,7 @@ from utils import (
     load_transcript,
     parse_timestamp,
     run_subprocess,
+    run_subprocess_with_progress,
     transcript_path_for_video,
     validate_clip_range,
 )
@@ -215,6 +217,7 @@ def render_short(
     config: dict,
     ass_path: Path | None,
     output_path: Path,
+    progress_callback: Callable[[dict[str, str]], None] | None = None,
 ) -> None:
     check_ffmpeg_available()
     info = get_media_info(video_path)
@@ -246,9 +249,14 @@ def render_short(
     else:
         args += ["-an"]
 
+    if progress_callback is not None:
+        args += ["-progress", "pipe:1", "-nostats"]
     args += ["-movflags", "+faststart", str(output_path)]
 
-    run_subprocess(args, "Short rendering")
+    if progress_callback is not None:
+        run_subprocess_with_progress(args, "Short rendering", progress_callback)
+    else:
+        run_subprocess(args, "Short rendering")
 
 
 def verify_output(output_path: Path, config: dict, expected_duration: float) -> list[str]:

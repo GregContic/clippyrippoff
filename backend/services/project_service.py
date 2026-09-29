@@ -8,7 +8,7 @@ from typing import Any
 
 from backend.core import PROJECT_ROOT
 from backend.services.job_registry import job_registry
-from scripts.utils import OUTPUT_SHORTS_DIR, PROCESSING_TEMP_DIR, get_media_info
+from scripts.utils import OUTPUT_SHORTS_DIR, PROCESSING_TEMP_DIR, get_media_info, run_subprocess
 
 
 def _now() -> str:
@@ -239,6 +239,44 @@ def _thumbnail_url(video_id: str, metadata: dict[str, Any]) -> str | None:
       if candidate.is_file() and candidate.stat().st_size > 0:
             return f"/media/cache/{video_id}/{candidate.name}"
     return None
+
+
+def _ensure_thumbnail_url(video_id: str, metadata: dict[str, Any]) -> str | None:
+    existing = _thumbnail_url(video_id, metadata)
+    if existing:
+        return existing
+
+    source = source_path(video_id)
+    if source is None:
+        return None
+
+    thumbnail_path = project_dir(video_id) / "thumbnail.jpg"
+    try:
+        duration = source_duration(video_id) or 0.0
+        timestamp = max(duration / 2.0, 0.0)
+        temporary_path = thumbnail_path.with_suffix(".tmp.jpg")
+        run_subprocess(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{timestamp:.3f}",
+                "-i",
+                str(source),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(temporary_path),
+            ],
+            f"Thumbnail extraction for {video_id}",
+        )
+        if not temporary_path.exists() or temporary_path.stat().st_size == 0:
+            return None
+        temporary_path.replace(thumbnail_path)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return f"/media/cache/{video_id}/{thumbnail_path.name}"
 
 
 def _render_jobs_for_video(video_id: str) -> list[Any]:
@@ -501,7 +539,7 @@ def project_summary(video_id: str) -> dict[str, Any] | None:
         "video_id": video_id,
         "title": metadata.get("title"),
         "url": metadata.get("url"),
-        "source_thumbnail_url": _thumbnail_url(video_id, metadata),
+        "source_thumbnail_url": _ensure_thumbnail_url(video_id, metadata),
         "status": metadata.get("status", "unknown"),
         "analysis_stage": metadata.get("analysis_stage"),
         "message": metadata.get("message"),

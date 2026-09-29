@@ -92,7 +92,7 @@ class JobRegistry:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         path = self._job_path(record.id)
         payload = record.to_dict()
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.replace(path)
 
@@ -151,6 +151,7 @@ class JobRegistry:
         message: str | None = None,
         result: dict[str, Any] | None = None,
         retry_of: str | None = None,
+        percent: float | None = None,
     ) -> JobRecord:
         record = JobRecord(
             id=str(uuid.uuid4()),
@@ -161,6 +162,7 @@ class JobRegistry:
             message=message,
             result=result,
             retry_of=retry_of,
+            percent=percent,
         )
         return self._store(record)
 

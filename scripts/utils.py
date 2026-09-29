@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Project root is the parent of the "scripts" directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -100,6 +100,55 @@ def run_subprocess(args: list[str], description: str) -> subprocess.CompletedPro
             f"FFmpeg/tool output:\n{stderr_tail}"
         )
     return result
+
+
+def run_subprocess_with_progress(
+    args: list[str],
+    description: str,
+    on_progress: Callable[[dict[str, str]], None],
+) -> subprocess.CompletedProcess:
+    """Run a process whose machine-readable progress is written to stdout.
+
+    stderr is merged into the same pipe so FFmpeg output is drained continuously
+    and cannot deadlock while the progress callback updates a render job.
+    """
+    try:
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except FileNotFoundError as exc:
+        raise FFmpegNotFoundError(
+            f"Could not execute '{args[0]}'. Is it installed and in PATH?\n{exc}"
+        ) from exc
+
+    output_lines: list[str] = []
+    progress: dict[str, str] = {}
+    assert process.stdout is not None
+    for line in process.stdout:
+        output_lines.append(line)
+        text = line.strip()
+        if "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        progress[key] = value
+        if key in {"out_time_us", "out_time_ms", "progress"}:
+            on_progress(dict(progress))
+
+    return_code = process.wait()
+    if return_code != 0:
+        stderr_tail = "\n".join("".join(output_lines).strip().splitlines()[-20:])
+        raise RuntimeError(
+            f"{description} failed (exit code {return_code}).\n"
+            f"Command: {' '.join(args)}\n"
+            f"FFmpeg/tool output:\n{stderr_tail}"
+        )
+    return subprocess.CompletedProcess(args, return_code, stdout="".join(output_lines), stderr=None)
 
 
 def get_media_info(video_path: Path) -> dict[str, Any]:
