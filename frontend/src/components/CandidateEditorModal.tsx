@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { getEditorState, getSettings, resolveMediaUrl, saveEditorState } from '../api/client';
-import type { Candidate, CaptionSegmentEdit, CandidateEditorState, ProjectEditorState, Settings } from '../api/types';
+import { createCaptionPreset, deleteCaptionPreset, getEditorState, getSettings, listCaptionPresets, resolveMediaUrl, saveEditorState } from '../api/client';
+import type { Candidate, CaptionPreset, CaptionSegmentEdit, CandidateEditorState, ProjectEditorState, Settings } from '../api/types';
 import { formatClock, formatDuration } from '../lib/format';
 import { Button, Card } from './ui';
 
@@ -85,6 +85,8 @@ function CandidateEditorModalContent({
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [loadingState, setLoadingState] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [presets, setPresets] = useState<CaptionPreset[]>([]);
+  const [presetName, setPresetName] = useState('');
 
   useEffect(() => {
     let active = true;
@@ -103,6 +105,10 @@ function CandidateEditorModalContent({
     return () => {
       active = false;
     };
+  }, []);
+
+  useEffect(() => {
+    void listCaptionPresets().then(setPresets).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -201,6 +207,8 @@ function CandidateEditorModalContent({
     const matching = currentSegments.find((segment) => playbackTime >= segment.start && playbackTime <= segment.end);
     return matching?.text ?? '';
   }, [currentSegments, playbackTime]);
+  const captionSettings = candidateState.render_settings;
+  const previewAnimation = captionSettings.caption_animation ?? 'none';
   const renderSnapshot: CandidateEditorState = {
     trim: isFiniteNumber(start) && isFiniteNumber(end) ? { start, end } : candidateState.trim,
     caption_segments: currentSegments,
@@ -374,7 +382,7 @@ function CandidateEditorModalContent({
                     />
                     {activeCaption ? (
                       <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-4">
-                        <div className="max-w-[90%] rounded-2xl border border-surface-600 bg-surface-900 px-4 py-3 text-center text-sm font-semibold leading-6 text-white shadow-subtle">
+                          <div className={`max-w-[90%] rounded-2xl border border-surface-600 bg-surface-900 px-4 py-3 text-center leading-6 text-white shadow-subtle ${previewAnimation === 'fade' ? 'animate-[caption-fade_160ms_ease-out]' : previewAnimation === 'pop' ? 'animate-[caption-pop_160ms_ease-out]' : ''}`} style={{ fontFamily: captionSettings.caption_font_name ?? 'Arial Black', fontSize: `${Math.min(captionSettings.caption_font_size ?? 72, 96) / 4}px`, fontWeight: captionSettings.caption_bold === false ? 500 : 700, color: previewAnimation === 'karaoke' ? '#facc15' : undefined, marginBottom: `${(captionSettings.caption_vertical_margin_percent ?? 0.3) * 12}px` }}>
                           {activeCaption}
                         </div>
                       </div>
@@ -534,7 +542,14 @@ function CandidateEditorModalContent({
 
             <div className="space-y-3 rounded-2xl border border-surface-700 bg-surface-800 p-4">
               <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Render settings</div>
+              <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                <label className="space-y-1 text-sm text-slate-300"><span className="block text-xs uppercase tracking-[0.18em] text-slate-500">Caption preset</span><select value={captionSettings.caption_preset_id ?? ''} onChange={(event) => { const preset = presets.find((item) => item.id === event.target.value); if (preset) setEditorState((current) => current ? ({ ...current, candidates: { ...current.candidates, [String(candidate.id)]: { ...(current.candidates[String(candidate.id)] ?? buildDefaultCandidateState(candidate)), render_settings: { ...(current.candidates[String(candidate.id)] ?? buildDefaultCandidateState(candidate)).render_settings, ...preset.settings, caption_preset_id: preset.id }, caption_segments: currentSegments, trim: candidateState.trim, selected: true } } }) : current); }} className="w-full rounded-xl border border-surface-600 bg-surface-900 px-3 py-2 text-slate-100"><option value="">Choose a preset</option>{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}{preset.built_in ? ' (built-in)' : ''}</option>)}</select></label>
+                <label className="space-y-1 text-sm text-slate-300"><span className="block text-xs uppercase tracking-[0.18em] text-slate-500">Save as</span><input value={presetName} onChange={(event) => setPresetName(event.target.value)} placeholder="Custom name" className="w-full rounded-xl border border-surface-600 bg-surface-900 px-3 py-2 text-slate-100" /></label>
+                <Button type="button" variant="secondary" className="self-end" disabled={!presetName.trim()} onClick={() => { void createCaptionPreset(presetName.trim(), captionSettings).then((preset) => { setPresets((current) => [...current, preset]); setPresetName(''); }).catch(() => undefined); }}>Save preset</Button>
+              </div>
               <div className="grid gap-3 sm:grid-cols-2">
+                <label className="space-y-1 text-sm text-slate-300"><span className="block text-xs uppercase tracking-[0.18em] text-slate-500">Caption animation</span><select value={captionSettings.caption_animation ?? 'none'} onChange={(event) => setRenderSetting('caption_animation', event.target.value as NonNullable<CandidateEditorState['render_settings']['caption_animation']>)} className="w-full rounded-xl border border-surface-600 bg-surface-900 px-3 py-2 text-slate-100"><option value="none">Static</option><option value="pop">Pop</option><option value="karaoke">Karaoke highlight</option><option value="fade">Smooth fade</option></select></label>
+                {previewAnimation !== 'none' ? <label className="space-y-1 text-sm text-slate-300"><span className="block text-xs uppercase tracking-[0.18em] text-slate-500">Effect duration (seconds)</span><input type="number" min="0.02" max="0.8" step="0.01" value={captionSettings.caption_animation_duration ?? 0.16} onChange={(event) => setRenderSetting('caption_animation_duration', Number(event.target.value))} className="w-full rounded-xl border border-surface-600 bg-surface-900 px-3 py-2 text-slate-100" /></label> : null}
                 <label className="space-y-1 text-sm text-slate-300">
                   <span className="block text-xs uppercase tracking-[0.18em] text-slate-500">Output width</span>
                   <input type="number" step="1" min="1" value={candidateState.render_settings.output_width ?? settings?.output_width ?? 1080} onChange={(event) => setRenderSetting('output_width', Number(event.target.value))} className="w-full rounded-xl border border-surface-600 bg-surface-900 px-3 py-2 text-slate-100" />
@@ -551,11 +566,16 @@ function CandidateEditorModalContent({
                   <input type="checkbox" checked={candidateState.render_settings.captions_enabled ?? true} onChange={(event) => setRenderSetting('captions_enabled', event.target.checked)} className="h-4 w-4 rounded border-surface-600 bg-surface-900 text-accent-500" />
                   Captions enabled
                 </label>
+                <label className="space-y-1 text-sm text-slate-300"><span className="block text-xs uppercase tracking-[0.18em] text-slate-500">Font size</span><input type="number" min="16" max="180" value={captionSettings.caption_font_size ?? 72} onChange={(event) => setRenderSetting('caption_font_size', Number(event.target.value))} className="w-full rounded-xl border border-surface-600 bg-surface-900 px-3 py-2 text-slate-100" /></label>
+                <label className="space-y-1 text-sm text-slate-300"><span className="block text-xs uppercase tracking-[0.18em] text-slate-500">Caption font</span><select value={captionSettings.caption_font_name ?? 'Arial Black'} onChange={(event) => setRenderSetting('caption_font_name', event.target.value)} className="w-full rounded-xl border border-surface-600 bg-surface-900 px-3 py-2 text-slate-100"><option>Arial</option><option>Arial Black</option><option>DejaVu Sans</option><option>Liberation Sans</option><option>Verdana</option></select></label>
+                <label className="space-y-1 text-sm text-slate-300"><span className="block text-xs uppercase tracking-[0.18em] text-slate-500">Vertical offset</span><input type="number" min="0.05" max="0.8" step="0.01" value={captionSettings.caption_vertical_margin_percent ?? 0.3} onChange={(event) => setRenderSetting('caption_vertical_margin_percent', Number(event.target.value))} className="w-full rounded-xl border border-surface-600 bg-surface-900 px-3 py-2 text-slate-100" /></label>
+                <label className="flex items-center gap-3 rounded-xl border border-surface-700 bg-surface-900 px-3 py-2 text-sm text-slate-300"><input type="checkbox" checked={captionSettings.caption_bold ?? true} onChange={(event) => setRenderSetting('caption_bold', event.target.checked)} className="h-4 w-4" />Bold captions</label>
                 <label className="flex items-center gap-3 rounded-xl border border-surface-700 bg-surface-900 px-3 py-2 text-sm text-slate-300">
                   <input type="checkbox" checked={candidateState.render_settings.normalize_audio ?? settings?.normalize_audio ?? true} onChange={(event) => setRenderSetting('normalize_audio', event.target.checked)} className="h-4 w-4 rounded border-surface-600 bg-surface-900 text-accent-500" />
                   Normalize audio
                 </label>
               </div>
+              <div className="flex flex-wrap gap-2">{presets.filter((preset) => !preset.built_in).map((preset) => <Button key={preset.id} type="button" variant="secondary" onClick={() => { void deleteCaptionPreset(preset.id).then(() => setPresets((current) => current.filter((item) => item.id !== preset.id))).catch(() => undefined); }}>Delete {preset.name}</Button>)}</div>
               <div className="rounded-xl border border-surface-700 bg-surface-900 p-3 text-sm text-slate-300">
                 <div className="font-semibold text-white">Render summary</div>
                 <div className="mt-2 grid gap-1 text-sm text-slate-300">

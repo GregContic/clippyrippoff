@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.core import PROJECT_ROOT  # noqa: F401 - ensures scripts/ is on sys.path
 from backend.api.candidates import router as candidates_router
+from backend.api.caption_presets import router as caption_presets_router
 from backend.api.library import router as library_router
 from backend.api.projects import router as projects_router
 from backend.api.renders import router as renders_router
@@ -27,6 +28,7 @@ app.add_middleware(
 app.include_router(videos_router)
 app.include_router(projects_router)
 app.include_router(candidates_router)
+app.include_router(caption_presets_router)
 app.include_router(renders_router)
 app.include_router(library_router)
 app.include_router(settings_router)

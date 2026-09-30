@@ -93,7 +93,7 @@ def _render_config_for(base_config: dict, candidate_state: dict) -> dict:
     if not isinstance(render_settings, dict):
         render_settings = {}
     merged = dict(base_config)
-    for key in ("output_width", "output_height", "fps", "normalize_audio"):
+    for key in ("output_width", "output_height", "fps", "normalize_audio", "caption_font_name", "caption_font_size", "caption_primary_color", "caption_outline_color", "caption_shadow_color", "caption_outline_width", "caption_shadow_depth", "caption_vertical_margin_percent", "caption_bold", "caption_animation", "caption_animation_duration", "caption_highlight_color"):
         if key in render_settings and render_settings[key] is not None:
             merged[key] = render_settings[key]
     return merged
@@ -175,6 +175,7 @@ def submit_renders(
                 "fps": effective_config.get("fps"),
                 "captions_enabled": _captions_enabled_for(effective_config, candidate_state),
                 "normalize_audio": effective_config.get("normalize_audio"),
+                **{key: effective_config.get(key) for key in ("caption_font_name", "caption_font_size", "caption_primary_color", "caption_outline_color", "caption_shadow_color", "caption_outline_width", "caption_shadow_depth", "caption_vertical_margin_percent", "caption_bold", "caption_preset_id", "caption_animation", "caption_animation_duration", "caption_highlight_color")},
             },
             "caption_segments": _caption_segments_for(candidate_state, []),
         }

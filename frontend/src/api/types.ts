@@ -81,6 +81,19 @@ export interface RenderSettings {
   fps?: number | null;
   captions_enabled?: boolean | null;
   normalize_audio?: boolean | null;
+  caption_font_name?: string | null;
+  caption_font_size?: number | null;
+  caption_primary_color?: string | null;
+  caption_outline_color?: string | null;
+  caption_shadow_color?: string | null;
+  caption_outline_width?: number | null;
+  caption_shadow_depth?: number | null;
+  caption_vertical_margin_percent?: number | null;
+  caption_bold?: boolean | null;
+  caption_preset_id?: string | null;
+  caption_animation?: 'none' | 'pop' | 'karaoke' | 'fade' | null;
+  caption_animation_duration?: number | null;
+  caption_highlight_color?: string | null;
 }
 
 export interface CandidateEditorState {
@@ -119,6 +132,16 @@ export interface RenderJob {
   result?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+  review_status: 'pending_review' | 'approved' | 'needs_changes';
+  review_notes: string;
+}
+
+export interface CaptionPreset {
+  id: string;
+  name: string;
+  built_in: boolean;
+  version: number;
+  settings: RenderSettings;
 }
 
 export interface LibraryItem {
@@ -127,6 +150,8 @@ export interface LibraryItem {
   size_bytes: number;
   created_at?: string | null;
   duration?: number | null;
+  review_status?: 'pending_review' | 'approved' | 'needs_changes';
+  render_job_id?: string | null;
 }
 
 export interface LibraryResponse {

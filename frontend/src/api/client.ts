@@ -1,5 +1,6 @@
 import type {
   AnalyzeResponse,
+  CaptionPreset,
   CandidateEditorState,
   CandidateListResponse,
   LibraryResponse,
@@ -138,6 +139,29 @@ export function retryRender(renderId: string): Promise<RenderResponse> {
   return requestJson<RenderResponse>(`/api/renders/${encodeURIComponent(renderId)}/retry`, {
     method: 'POST',
   });
+}
+
+export function updateRenderReview(renderId: string, status: RenderJob['review_status'], notes: string): Promise<RenderJob> {
+  return requestJson<RenderJob>(`/api/renders/${encodeURIComponent(renderId)}/review`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status, notes }),
+  });
+}
+
+export function listCaptionPresets(): Promise<CaptionPreset[]> {
+  return requestJson<CaptionPreset[]>('/api/caption-presets');
+}
+
+export function createCaptionPreset(name: string, settings: CaptionPreset['settings']): Promise<CaptionPreset> {
+  return requestJson<CaptionPreset>('/api/caption-presets', { method: 'POST', body: JSON.stringify({ name, settings }) });
+}
+
+export function updateCaptionPreset(id: string, name: string, settings: CaptionPreset['settings']): Promise<CaptionPreset> {
+  return requestJson<CaptionPreset>(`/api/caption-presets/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, settings }) });
+}
+
+export function deleteCaptionPreset(id: string): Promise<void> {
+  return requestJson<void>(`/api/caption-presets/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export function listLibrary(): Promise<LibraryResponse> {

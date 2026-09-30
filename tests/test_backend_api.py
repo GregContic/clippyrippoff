@@ -267,7 +267,7 @@ class TestBackendApi(unittest.TestCase):
                     "1": {
                         "trim": {"start": 14.0, "end": 26.0},
                         "caption_segments": [{"start": 14.0, "end": 16.0, "text": "Edited caption"}],
-                        "render_settings": {"output_width": 720, "output_height": 1280, "fps": 24, "captions_enabled": False, "normalize_audio": False},
+                        "render_settings": {"output_width": 720, "output_height": 1280, "fps": 24, "captions_enabled": False, "normalize_audio": False, "caption_animation": "fade", "caption_animation_duration": 0.2},
                         "selected": True,
                     }
                 },
@@ -310,7 +310,7 @@ class TestBackendApi(unittest.TestCase):
             captured.append((config, str(ass_path) if ass_path is not None else None, start, end))
             output_path.write_bytes(b"rendered")
 
-        self.client.put(
+        editor_response = self.client.put(
             "/api/videos/abc123XYZ_1/editor-state",
             json={
                 "video_id": "abc123XYZ_1",
@@ -319,12 +319,14 @@ class TestBackendApi(unittest.TestCase):
                     "1": {
                         "trim": {"start": 14.0, "end": 26.0},
                         "caption_segments": [{"start": 14.0, "end": 16.0, "text": "Edited caption"}],
-                        "render_settings": {"output_width": 720, "output_height": 1280, "fps": 24, "captions_enabled": False, "normalize_audio": False},
+                        "render_settings": {"output_width": 720, "output_height": 1280, "fps": 24, "captions_enabled": False, "normalize_audio": False, "caption_animation": "fade", "caption_animation_duration": 0.2},
                         "selected": True,
                     }
                 },
             },
         )
+        self.assertEqual(editor_response.status_code, 200)
+        self.assertEqual(editor_response.json()["candidates"]["1"]["render_settings"]["caption_animation"], "fade")
 
         with patch.object(render_service, "render_short", side_effect=fake_render_short), patch.object(render_service, "verify_output", return_value=[]):
             response = self.client.post("/api/videos/abc123XYZ_1/render", json={"candidate_ids": [1]})
@@ -339,7 +341,11 @@ class TestBackendApi(unittest.TestCase):
         self.assertEqual(config["output_height"], 1280)
         self.assertEqual(config["fps"], 24)
         self.assertFalse(config["normalize_audio"])
+        self.assertEqual(config["caption_animation"], "fade")
+        self.assertEqual(config["caption_animation_duration"], 0.2)
         self.assertIsNone(ass_path)
+        snapshot = job_registry.get(response.json()["render_job_ids"][0]).result["request_signature"]
+        self.assertEqual(snapshot["render_settings"]["caption_animation"], "fade")
 
     def test_render_without_override_keeps_candidate_boundaries(self) -> None:
         self._create_project()

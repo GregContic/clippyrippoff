@@ -335,6 +335,13 @@ export function ProjectWorkspacePage() {
         <div className="space-y-4">
           <RenderQueue
             jobs={renderJobs.filter((job) => job.video_id === project.video_id)}
+            onNeedsChanges={(job) => {
+              const candidate = candidates.find((item) => item.id === job.candidate_id);
+              if (candidate) {
+                setActiveTab('candidates');
+                setEditingCandidate(candidate);
+              }
+            }}
             onRemove={async (renderId) => {
               await deleteRender(renderId).catch(() => undefined);
               await loadWorkspace();

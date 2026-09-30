@@ -1,12 +1,15 @@
 """Tests for scripts/make_short.py — pure Python logic (crop math, caption
 chunking/formatting). No FFmpeg or real video required."""
 import unittest
+import tempfile
+from pathlib import Path
 
 from tests import SCRIPTS_DIR  # noqa: F401 (ensures scripts/ is importable)
 from make_short import (
     _format_ass_time,
     build_caption_cues,
     compute_center_crop,
+    write_ass_subtitles,
 )
 
 
@@ -96,6 +99,49 @@ class TestBuildCaptionCues(unittest.TestCase):
             max_words_per_chunk=5, max_chars_per_line=18, max_lines=2,
         )
         self.assertEqual(cues, [])
+
+    def test_word_timestamps_are_preserved_and_trim_relative(self):
+        cues = build_caption_cues(
+            [{"start": 10.0, "end": 14.0, "text": "hello world", "words": [{"start": 10.0, "end": 11.0, "word": "hello"}, {"start": 11.0, "end": 14.0, "word": "world"}]}],
+            clip_start=10.5, clip_end=14,
+            max_words_per_chunk=5, max_chars_per_line=30, max_lines=2,
+        )
+        self.assertEqual(len(cues), 1)
+        self.assertAlmostEqual(cues[0].words[0].start, 0.0)
+        self.assertAlmostEqual(cues[0].words[1].start, 0.5)
+
+    def test_invalid_word_timestamps_use_segment_fallback(self):
+        cues = build_caption_cues(
+            [{"start": 5.0, "end": 8.0, "text": "NO WAY", "words": [{"start": 7.0, "end": 6.0, "word": "NO"}]}],
+            clip_start=0, clip_end=10,
+            max_words_per_chunk=5, max_chars_per_line=30, max_lines=2,
+        )
+        self.assertEqual(cues[0].words, [])
+
+
+class TestAnimatedAssSubtitles(unittest.TestCase):
+    def test_supported_animations_write_ass_events(self):
+        from make_short import build_caption_cues
+        segments = [{"start": 5.0, "end": 7.0, "text": "hello world", "words": [{"start": 5.0, "end": 6.0, "word": "hello"}, {"start": 6.0, "end": 7.0, "word": "world"}]}]
+        cues = build_caption_cues(segments, 5.0, 7.0, 5, 30, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            for animation, marker in (("none", "hello world"), ("fade", r"\fad"), ("pop", r"\fscx80"), ("karaoke", r"\k")):
+                path = Path(directory) / f"{animation}.ass"
+                write_ass_subtitles(cues, {"output_width": 1080, "output_height": 1920, "caption_animation": animation}, path)
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(marker, text)
+                self.assertNotIn(r"\n", text)
+
+    def test_pop_fallback_keeps_ass_line_breaks(self):
+        from make_short import CaptionCue
+
+        cue = CaptionCue(start=0.0, end=1.0, lines=["first line", "second line"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pop.ass"
+            write_ass_subtitles([cue], {"output_width": 1080, "output_height": 1920, "caption_animation": "pop"}, path)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(r"\N", text)
+            self.assertNotIn(r"\\N", text)
 
 
 if __name__ == "__main__":

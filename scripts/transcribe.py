@@ -76,21 +76,29 @@ def transcribe_audio(audio_path: Path, model_name: str):
 
     try:
         model = whisper.load_model(model_name)
-        result = model.transcribe(str(audio_path), verbose=False)
+        result = model.transcribe(str(audio_path), verbose=False, word_timestamps=True)
     except Exception as exc:  # Whisper can raise various errors depending on backend.
         raise TranscriptionError(f"Whisper transcription failed for {audio_path.name}: {exc}") from exc
     return result
 
 
 def build_transcript_json(video_path: Path, whisper_result: dict) -> dict:
-    segments = [
-        {
-            "start": round(float(seg["start"]), 2),
-            "end": round(float(seg["end"]), 2),
-            "text": seg["text"].strip(),
-        }
-        for seg in whisper_result.get("segments", [])
-    ]
+    segments = []
+    for seg in whisper_result.get("segments", []):
+        item = {"start": round(float(seg["start"]), 2), "end": round(float(seg["end"]), 2), "text": seg["text"].strip()}
+        words = []
+        for word in seg.get("words", []):
+            try:
+                start = float(word["start"])
+                end = float(word["end"])
+                text = str(word.get("word", "")).strip()
+            except (KeyError, TypeError, ValueError):
+                continue
+            if text and start < end:
+                words.append({"start": round(start, 3), "end": round(end, 3), "word": text})
+        if words:
+            item["words"] = words
+        segments.append(item)
     return {"source": video_path.name, "segments": segments}
 
 

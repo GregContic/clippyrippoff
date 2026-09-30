@@ -2,14 +2,19 @@ import type { RenderJob } from '../api/types';
 import { resolveMediaUrl, retryRender } from '../api/client';
 import { formatDate } from '../lib/format';
 import { Button, Card, EmptyState } from './ui';
+import { ReviewModal } from './ReviewModal';
+import { useState } from 'react';
 
 export function RenderQueue({
   jobs,
   onRemove,
+  onNeedsChanges,
 }: {
   jobs: RenderJob[];
   onRemove: (jobId: string) => void;
+  onNeedsChanges?: (job: RenderJob) => void;
 }) {
+  const [reviewJob, setReviewJob] = useState<RenderJob | null>(null);
   if (!jobs.length) {
     return <EmptyState title="Render queue is empty" description="Submitted clip renders will appear here." />;
   }
@@ -36,6 +41,7 @@ export function RenderQueue({
                   <span className={`rounded-full border px-2 py-0.5 text-[11px] uppercase tracking-[0.18em] ${job.status === 'running' ? 'border-warning-500/30 bg-warning-500/10 text-warning-200' : job.status === 'completed' ? 'border-success-500/30 bg-success-500/10 text-success-100' : job.status === 'failed' || job.status === 'interrupted' ? 'border-danger-500/30 bg-danger-500/10 text-danger-100' : 'border-accent-500/30 bg-accent-500/10 text-accent-300'}`}>
                     {job.status}
                   </span>
+                  {job.status === 'completed' ? <span className={`rounded-full border px-2 py-0.5 text-[11px] uppercase tracking-[0.18em] ${job.review_status === 'approved' ? 'border-success-500/30 bg-success-500/10 text-success-100' : job.review_status === 'needs_changes' ? 'border-warning-500/30 bg-warning-500/10 text-warning-200' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>{job.review_status === 'needs_changes' ? 'Needs Changes' : job.review_status === 'approved' ? 'Approved' : 'Pending Review'}</span> : null}
                 </div>
                 {job.error ? <div className="mt-3 rounded-xl border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-sm text-danger-100">{job.error}</div> : null}
                 {snapshot ? (
@@ -50,9 +56,7 @@ export function RenderQueue({
 
               <div className="flex flex-wrap gap-2">
                 {openUrl && job.status === 'completed' ? (
-                  <a href={openUrl} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center rounded-xl border border-surface-600 bg-surface-800 px-4 py-2 text-sm font-medium text-slate-100 transition hover:border-accent-500/40 hover:bg-surface-700">
-                    View
-                  </a>
+                  <Button type="button" variant="secondary" onClick={() => setReviewJob(job)}>Review</Button>
                 ) : null}
                 {job.status === 'failed' || job.status === 'interrupted' ? (
                   <Button type="button" variant="secondary" onClick={() => { void retryRender(job.id).then(() => window.location.reload()).catch(() => undefined); }}>
@@ -74,6 +78,7 @@ export function RenderQueue({
           </Card>
         );
       })}
+      <ReviewModal job={reviewJob} onClose={() => setReviewJob(null)} onUpdated={(updated) => setReviewJob(updated)} onNeedsChanges={onNeedsChanges} />
     </div>
   );
 }

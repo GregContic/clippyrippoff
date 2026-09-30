@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+import re
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -43,6 +44,19 @@ class RenderSettings(BaseModel):
     fps: float | None = None
     captions_enabled: bool | None = None
     normalize_audio: bool | None = None
+    caption_font_name: str | None = None
+    caption_font_size: int | None = None
+    caption_primary_color: str | None = None
+    caption_outline_color: str | None = None
+    caption_shadow_color: str | None = None
+    caption_outline_width: int | None = None
+    caption_shadow_depth: int | None = None
+    caption_vertical_margin_percent: float | None = None
+    caption_bold: bool | None = None
+    caption_preset_id: str | None = None
+    caption_animation: Literal["none", "pop", "karaoke", "fade"] = "none"
+    caption_animation_duration: float = 0.16
+    caption_highlight_color: str = "&H0000FFFF"
 
     @model_validator(mode="after")
     def _validate_render_settings(self) -> "RenderSettings":
@@ -52,6 +66,24 @@ class RenderSettings(BaseModel):
             raise ValueError("Output height must be greater than zero.")
         if self.fps is not None and (not math.isfinite(self.fps) or self.fps <= 0):
             raise ValueError("FPS must be a positive finite number.")
+        if self.caption_font_name is not None and self.caption_font_name not in {"Arial", "Arial Black", "DejaVu Sans", "Liberation Sans", "Verdana"}:
+            raise ValueError("Caption font is not supported.")
+        if self.caption_font_size is not None and not 16 <= self.caption_font_size <= 180:
+            raise ValueError("Caption font size must be between 16 and 180.")
+        for name in ("caption_primary_color", "caption_outline_color", "caption_shadow_color"):
+            value = getattr(self, name)
+            if value is not None and not re.fullmatch(r"&H[0-9A-Fa-f]{8}", value):
+                raise ValueError(f"{name} must be an 8-digit ASS color.")
+        if self.caption_highlight_color is not None and not re.fullmatch(r"&H[0-9A-Fa-f]{8}", self.caption_highlight_color):
+            raise ValueError("caption_highlight_color must be an 8-digit ASS color.")
+        if self.caption_animation_duration is not None and (not math.isfinite(self.caption_animation_duration) or not 0.02 <= self.caption_animation_duration <= 0.8):
+            raise ValueError("Caption animation duration must be between 0.02 and 0.8 seconds.")
+        if self.caption_outline_width is not None and not 0 <= self.caption_outline_width <= 20:
+            raise ValueError("Caption outline width must be between 0 and 20.")
+        if self.caption_shadow_depth is not None and not 0 <= self.caption_shadow_depth <= 20:
+            raise ValueError("Caption shadow depth must be between 0 and 20.")
+        if self.caption_vertical_margin_percent is not None and not 0.05 <= self.caption_vertical_margin_percent <= 0.8:
+            raise ValueError("Caption vertical margin must be between 0.05 and 0.8.")
         return self
 
 
@@ -90,6 +122,24 @@ class RenderRequest(BaseModel):
     candidate_states: dict[str, CandidateEditorState] = Field(default_factory=dict)
 
 
+class ReviewRequest(BaseModel):
+    status: Literal["pending_review", "approved", "needs_changes"]
+    notes: str = ""
+
+
+class CaptionPreset(BaseModel):
+    id: str
+    name: str
+    built_in: bool = False
+    version: int = 1
+    settings: RenderSettings
+
+
+class CaptionPresetRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    settings: RenderSettings
+
+
 class RenderResponse(BaseModel):
     video_id: str
     render_job_ids: list[str]
@@ -111,6 +161,8 @@ class JobResponse(BaseModel):
     result: dict[str, Any] | None = None
     created_at: str
     updated_at: str
+    review_status: str = "pending_review"
+    review_notes: str = ""
 
 
 class CandidateResponse(BaseModel):
@@ -204,6 +256,8 @@ class LibraryItem(BaseModel):
     size_bytes: int
     created_at: str | None = None
     duration: float | None = None
+    review_status: str = "pending_review"
+    render_job_id: str | None = None
 
 
 class LibraryResponse(BaseModel):

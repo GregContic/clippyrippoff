@@ -11,8 +11,9 @@ audio -> export to output/shorts/ -> verify the rendered file.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -98,10 +99,18 @@ def escape_ffmpeg_path(path: Path) -> str:
 # Captions
 # --------------------------------------------------------------------------
 @dataclass
+class CaptionWord:
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
 class CaptionCue:
     start: float
     end: float
     lines: list[str]
+    words: list[CaptionWord] = field(default_factory=list)
 
 
 def _wrap_words(words: list[str], max_chars_per_line: int, max_lines: int) -> list[str]:
@@ -147,6 +156,25 @@ def build_caption_cues(
         if not words:
             continue
 
+        timed_words: list[CaptionWord] = []
+        raw_words = seg.get("words")
+        if isinstance(raw_words, list) and len(raw_words) == len(words):
+            parsed_words: list[CaptionWord] = []
+            for raw_word in raw_words:
+                try:
+                    word_start = float(raw_word["start"])
+                    word_end = float(raw_word["end"])
+                    word_text = str(raw_word.get("word", "")).strip()
+                except (KeyError, TypeError, ValueError):
+                    parsed_words = []
+                    break
+                if not word_text or not math.isfinite(word_start) or not math.isfinite(word_end) or word_end <= word_start:
+                    parsed_words = []
+                    break
+                parsed_words.append(CaptionWord(start=max(word_start, clip_start), end=min(word_end, clip_end), text=word_text))
+            if parsed_words and all(word.end > word.start for word in parsed_words):
+                timed_words = parsed_words
+
         chunks = [words[i:i + max_words_per_chunk] for i in range(0, len(words), max_words_per_chunk)]
         seg_duration = max(seg_end - seg_start, 0.01)
         chunk_duration = seg_duration / len(chunks)
@@ -155,7 +183,11 @@ def build_caption_cues(
             chunk_start = seg_start + i * chunk_duration - clip_start
             chunk_end = seg_start + (i + 1) * chunk_duration - clip_start
             lines = _wrap_words(chunk, max_chars_per_line, max_lines)
-            cues.append(CaptionCue(start=max(chunk_start, 0.0), end=chunk_end, lines=lines))
+            chunk_words = []
+            if timed_words:
+                word_offset = i * max_words_per_chunk
+                chunk_words = [CaptionWord(max(word.start - clip_start, 0.0), max(word.end - clip_start, 0.0), word.text) for word in timed_words[word_offset:word_offset + len(chunk)]]
+            cues.append(CaptionCue(start=max(chunk_start, 0.0), end=chunk_end, lines=lines, words=chunk_words))
     return cues
 
 
@@ -169,6 +201,42 @@ def _format_ass_time(seconds: float) -> str:
         centiseconds = 0
         secs += 1
     return f"{hours:d}:{minutes:02d}:{int(secs):02d}.{centiseconds:02d}"
+
+
+def _escape_ass_text(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+
+
+def _ass_word_duration(seconds: float) -> int:
+    return max(1, round(seconds * 100))
+
+
+def _pop_events(cue: CaptionCue, config: dict) -> list[str]:
+    if not cue.words:
+        text = r"\N".join(_escape_ass_text(line) for line in cue.lines)
+        return [f"Dialogue: 0,{_format_ass_time(cue.start)},{_format_ass_time(cue.end)},Default,,0,0,0,,{{\\fad(120,80)}}{text}\n"]
+    text_words = [word.text for word in cue.words]
+    events: list[str] = []
+    for index, word in enumerate(cue.words):
+        prefix = " ".join(text_words[:index])
+        current = _escape_ass_text(text_words[index])
+        suffix = " ".join(text_words[index + 1:])
+        text = " ".join(part for part in (prefix, f"{{\\fscx80\\fscy80\\t(0,{round(config.get('caption_animation_duration', 0.16) * 1000)},\\fscx100\\fscy100)}}{current}", suffix) if part)
+        events.append(f"Dialogue: 0,{_format_ass_time(word.start)},{_format_ass_time(cue.end)},Default,,0,0,0,,{text}\n")
+    return events
+
+
+def _animated_events(cue: CaptionCue, config: dict) -> list[str]:
+    animation = config.get("caption_animation", "none")
+    text = r"\N".join(_escape_ass_text(line) for line in cue.lines)
+    if animation == "fade":
+        return [f"Dialogue: 0,{_format_ass_time(cue.start)},{_format_ass_time(cue.end)},Default,,0,0,0,,{{\\fad(160,100)}}{text}\n"]
+    if animation == "karaoke" and cue.words:
+        karaoke = " ".join(f"{{\\k{_ass_word_duration(word.end - word.start)}}}{_escape_ass_text(word.text)}" for word in cue.words)
+        return [f"Dialogue: 0,{_format_ass_time(cue.start)},{_format_ass_time(cue.end)},Default,,0,0,0,,{{\\2c{config.get('caption_highlight_color', '&H0000FFFF')}}}{karaoke}\n"]
+    if animation == "pop":
+        return _pop_events(cue, config)
+    return [f"Dialogue: 0,{_format_ass_time(cue.start)},{_format_ass_time(cue.end)},Default,,0,0,0,,{text}\n"]
 
 
 def write_ass_subtitles(cues: list[CaptionCue], config: dict, ass_path: Path) -> None:
@@ -195,10 +263,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for cue in cues:
         if cue.end <= cue.start:
             continue
-        text = r"\N".join(cue.lines)
-        lines.append(
-            f"Dialogue: 0,{_format_ass_time(cue.start)},{_format_ass_time(cue.end)},Default,,0,0,0,,{text}\n"
-        )
+        lines.extend(_animated_events(cue, config))
 
     try:
         ass_path.parent.mkdir(parents=True, exist_ok=True)

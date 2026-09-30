@@ -604,6 +604,10 @@ def list_library_items() -> list[dict[str, Any]]:
     if not OUTPUT_SHORTS_DIR.exists():
         return []
     items: list[dict[str, Any]] = []
+    jobs_by_filename = {}
+    for job in job_registry.list():
+        if job.output_path:
+            jobs_by_filename[Path(job.output_path).name] = job
     for path in sorted(OUTPUT_SHORTS_DIR.glob("*.mp4"), reverse=True):
         if not path.is_file():
             continue
@@ -612,6 +616,7 @@ def list_library_items() -> list[dict[str, Any]]:
         except Exception:
             info = {"duration": None}
         stat = path.stat()
+        job = jobs_by_filename.get(path.name)
         items.append(
             {
                 "filename": path.name,
@@ -619,6 +624,8 @@ def list_library_items() -> list[dict[str, Any]]:
                 "size_bytes": stat.st_size,
                 "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
                 "duration": info.get("duration"),
+                "review_status": job.review_status if job is not None else "pending_review",
+                "render_job_id": job.id if job is not None else None,
             }
         )
     return items

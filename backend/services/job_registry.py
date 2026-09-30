@@ -36,6 +36,8 @@ class JobRecord:
     retry_of: str | None = None
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
+    review_status: str = "pending_review"
+    review_notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +56,8 @@ class JobRecord:
             "retry_of": self.retry_of,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "review_status": self.review_status,
+            "review_notes": self.review_notes,
         }
 
     @classmethod
@@ -74,6 +78,8 @@ class JobRecord:
             retry_of=payload.get("retry_of"),
             created_at=str(payload.get("created_at", _now())),
             updated_at=str(payload.get("updated_at", _now())),
+            review_status=str(payload.get("review_status", "pending_review")),
+            review_notes=str(payload.get("review_notes", "")),
         )
 
 
