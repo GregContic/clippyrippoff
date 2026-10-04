@@ -1,4 +1,5 @@
-import { Route, Routes, useLocation } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { useAuth } from './auth';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { Button } from './components/ui';
@@ -9,6 +10,7 @@ import { LibraryPage } from './pages/LibraryPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { ProjectWorkspacePage } from './pages/ProjectWorkspacePage';
+import { LoginPage } from './pages/LoginPage';
 
 function useRouteTitle(pathname: string) {
   if (pathname === '/' || pathname === '') {
@@ -39,8 +41,19 @@ function useRouteTitle(pathname: string) {
 }
 
 export function App() {
+  const { user, loading, logout } = useAuth();
   const location = useLocation();
   const route = useRouteTitle(location.pathname);
+
+  if (loading) {
+    return <div className="flex min-h-screen items-center justify-center bg-surface-950 text-sm text-slate-400">Checking session…</div>;
+  }
+  if (!user) {
+    return location.pathname === '/login' ? <LoginPage /> : <Navigate to="/login" replace state={{ from: location }} />;
+  }
+  if (location.pathname === '/login') {
+    return <Navigate to="/" replace />;
+  }
 
   return (
     <div className="min-h-screen bg-surface-950 text-slate-100">
@@ -50,7 +63,7 @@ export function App() {
           <TopBar
             title={route.title}
             subtitle={route.subtitle}
-            actions={location.pathname.startsWith('/projects/') || location.pathname.startsWith('/analyze/') ? <Button type="button" variant="secondary" onClick={() => window.history.back()}>Back</Button> : undefined}
+            actions={<><span className="text-sm text-slate-400">{user.username}</span><Button type="button" variant="ghost" onClick={() => void logout()}>Sign out</Button>{location.pathname.startsWith('/projects/') || location.pathname.startsWith('/analyze/') ? <Button type="button" variant="secondary" onClick={() => window.history.back()}>Back</Button> : undefined}</>}
           />
           <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
             <div className="mx-auto w-full max-w-7xl">

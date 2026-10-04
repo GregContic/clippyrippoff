@@ -25,6 +25,7 @@ from scripts.utils import (
     load_transcript,
     validate_clip_range,
 )
+from backend.services.storage import storage
 
 
 class TrimValidationError(ValueError):
@@ -208,11 +209,16 @@ def submit_renders(
         )
 
         def _runner(job_id: str, selected_candidate: dict = candidate, trim_override: object | None = selected_override, selected_state: dict = candidate_state, selected_config: dict = effective_config, signature: dict = request_signature) -> None:
+            ass_path: Path | None = None
             try:
                 metadata_local = load_project_metadata(video_id) or {}
                 source_path_local = Path(metadata_local.get("source_path") or "")
                 if not source_path_local.exists():
-                    raise FileNotFoundError("Cached source video is missing.")
+                    source_key = metadata_local.get("source_storage_key")
+                    if not isinstance(source_key, str):
+                        raise FileNotFoundError("Cached source video is missing.")
+                    source_path_local = PROCESSING_TEMP_DIR / "youtube" / video_id / Path(source_key).name
+                    storage.download_file(source_key, source_path_local)
                 transcript_file = PROCESSING_TEMP_DIR / "youtube" / video_id / "transcript.json"
                 if not transcript_file.exists():
                     raise FileNotFoundError("Cached transcript is missing.")
@@ -227,7 +233,6 @@ def submit_renders(
                     max_chars_per_line=base_config.get("caption_max_chars_per_line", 18),
                     max_lines=base_config.get("caption_max_lines", 2),
                 )
-                ass_path = None
                 if cues and _captions_enabled_for(selected_config, selected_state):
                     ass_path = PROCESSING_TEMP_DIR / f"{video_id}_{candidate_id}.ass"
                     write_ass_subtitles(cues, selected_config, ass_path)
@@ -250,6 +255,8 @@ def submit_renders(
                 problems = verify_output(output_path, selected_config, expected_duration=end - start)
                 if problems:
                     raise RuntimeError("; ".join(problems))
+                output_key = f"projects/{video_id}/renders/{output_path.name}"
+                storage.upload_file(output_path, output_key, "video/mp4")
                 register_render_output(video_id, output_path.name)
                 patched = patch_project_metadata(
                     video_id,
@@ -264,12 +271,17 @@ def submit_renders(
                     stage="complete",
                     message="Complete",
                     output_path=str(output_path),
-                    output_url=f"/media/shorts/{output_path.name}",
+                    output_url=f"/api/media/renders/{video_id}/{output_path.name}",
                     percent=100.0,
-                    result={"request_signature": signature, "start": start, "end": end, "render_settings": signature["render_settings"]},
+                    result={"request_signature": signature, "start": start, "end": end, "render_settings": signature["render_settings"], "output_storage_key": output_key},
                 )
             except Exception as exc:
+                if ass_path is not None:
+                    ass_path.unlink(missing_ok=True)
                 job_registry.update(job_id, status="failed", stage="failed", message="Rendering failed.", error=str(exc), result={"request_signature": signature})
+            else:
+                if ass_path is not None:
+                    ass_path.unlink(missing_ok=True)
 
         thread = threading.Thread(target=_runner, args=(record.id,), daemon=True)
         thread.start()

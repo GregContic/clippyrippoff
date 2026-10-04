@@ -80,6 +80,34 @@ Terminal 1:
 .\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
+## Authentication
+
+All API routes except `/api/health` and `/api/auth/login` require the
+server-managed owner session. Passwords use Argon2id-compatible
+`argon2-cffi` hashing; session cookies are HttpOnly and session tokens are
+stored only as hashes. State-changing browser requests also require the
+session-bound CSRF token and an allowed Origin.
+
+Create the first account once with:
+
+```powershell
+python scripts/create_owner.py
+```
+
+The command prompts for credentials and refuses to overwrite an existing
+owner. Never put bootstrap credentials in tracked files. Local development
+uses `AUTH_DATA_DIR=processing/auth` and `AUTH_COOKIE_SECURE=false`.
+Production must use HTTPS, set `AUTH_COOKIE_SECURE=true`, provide exact
+`AUTH_ALLOWED_ORIGINS` values, and place `AUTH_DATA_DIR` on durable private
+storage. The filesystem repository is replaceable; a database-backed
+repository is still required before horizontal scaling or multi-user access.
+
+Authentication is separate from authorization. This release has one owner, so
+all authenticated projects are in the owner workspace. Before supporting
+multiple users, persist project, render/job, and storage ownership IDs and
+enforce them throughout project, render, library, settings, and media
+services.
+
 Terminal 2:
 
 ```powershell
@@ -100,6 +128,9 @@ pip install -r requirements.txt
 cd frontend
 npm install
 ```
+
+Frontend dependencies (`node_modules/`) and generated production files
+(`frontend/dist/`) are local build outputs and are not committed.
 
 Troubleshooting:
 
@@ -342,3 +373,19 @@ file and FFmpeg. Verify those paths with a real authorized gameplay video.
 - Automatic title/thumbnail generation or posting schedules
 - Cloud processing or paid AI APIs
 - Sophisticated machine-learning video understanding
+## Storage and deployment
+
+The backend uses private storage by default. Set `STORAGE_BACKEND=local` (or
+leave it unset) for the existing filesystem workflow. For Render, set
+`STORAGE_BACKEND=r2` and provide the R2 variables shown in
+[.env.example](./.env.example). `R2_ENDPOINT_URL` must be the S3-compatible
+endpoint for the account; credentials are read only from the environment.
+
+Source videos and completed renders are transferred with streaming S3 APIs, not
+loaded into memory. FFmpeg always works on seekable local files under
+`TEMP_DIR`, which are safe to remove after a job finishes. Object access is
+served through backend-controlled routes; the bucket must remain private.
+
+For production, configure the Render service environment variables and a
+persistent private R2 bucket. No Cloudflare, Render, or Vercel settings are
+modified by this repository.

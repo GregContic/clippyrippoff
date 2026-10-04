@@ -9,12 +9,13 @@ export function ReviewModal({ job, onClose, onUpdated, onNeedsChanges }: { job: 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (!job) return null;
-  const snapshot = (job.result as { request_signature?: Record<string, any> } | null)?.request_signature;
-  const sourceUrl = resolveMediaUrl(job.output_url ?? (job.output_path ? `/media/shorts/${job.output_path.split(/[/\\]/).pop()}` : null));
+  const renderJob = job;
+  const snapshot = (renderJob.result as { request_signature?: Record<string, any> } | null)?.request_signature;
+  const sourceUrl = resolveMediaUrl(renderJob.output_url ?? (renderJob.output_path ? `/media/shorts/${renderJob.output_path.split(/[/\\]/).pop()}` : null));
   async function decide(status: RenderJob['review_status']) {
     setBusy(true); setError(null);
     try {
-      const updated = await updateRenderReview(job.id, status, notes);
+      const updated = await updateRenderReview(renderJob.id, status, notes);
       onUpdated(updated);
       if (status === 'needs_changes') onNeedsChanges?.(updated);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Unable to save review decision.'); }

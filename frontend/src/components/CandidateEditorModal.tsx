@@ -123,7 +123,7 @@ function CandidateEditorModalContent({
     setSaveMessage(null);
     Promise.all([
       getEditorState(videoId).catch(() => ({ video_id: videoId, candidates: {} as Record<string, CandidateEditorState> } as ProjectEditorState)),
-      transcriptUrl ? fetch(resolveMediaUrl(transcriptUrl) ?? transcriptUrl).then((response) => response.json()) : Promise.resolve(null),
+      transcriptUrl ? fetch(resolveMediaUrl(transcriptUrl) ?? transcriptUrl, { credentials: 'include' }).then((response) => response.json()) : Promise.resolve(null),
     ])
       .then(([state, transcript]) => {
         if (!active) {

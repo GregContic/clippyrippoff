@@ -12,6 +12,7 @@ from backend.main import app
 import backend.services.project_service as project_service
 import backend.services.render_service as render_service
 from backend.services.job_registry import job_registry
+from backend.services.auth import auth_repository
 
 
 class TestBackendApi(unittest.TestCase):
@@ -22,6 +23,9 @@ class TestBackendApi(unittest.TestCase):
         self.output_root = self.root / "output" / "shorts"
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.output_root.mkdir(parents=True, exist_ok=True)
+        auth_repository.root = self.root / "auth"
+        auth_repository.root.mkdir(parents=True, exist_ok=True)
+        auth_repository.bootstrap("owner", "test-password-123")
 
         self.patches = [
             patch.object(project_service, "PROJECT_CACHE_DIR", self.cache_root),
@@ -40,6 +44,9 @@ class TestBackendApi(unittest.TestCase):
         job_registry.reset()
 
         self.client = TestClient(app)
+        login = self.client.post("/api/auth/login", json={"username": "owner", "password": "test-password-123"}, headers={"Origin": "http://localhost:5173"})
+        self.assertEqual(login.status_code, 200)
+        self.client.headers.update({"Origin": "http://localhost:5173", "X-CSRF-Token": self.client.cookies.get("clippy_csrf")})
 
     def tearDown(self) -> None:
         for patcher in reversed(self.patches):

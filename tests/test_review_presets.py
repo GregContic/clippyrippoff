@@ -8,12 +8,16 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.services import caption_preset_service
 from backend.services.job_registry import job_registry
+from backend.services.auth import auth_repository
 
 
 class TestReviewAndPresets(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
+        auth_repository.root = self.root / "auth"
+        auth_repository.root.mkdir(parents=True)
+        auth_repository.bootstrap("owner", "test-password-123")
         self.output = self.root / "output" / "shorts"
         self.output.mkdir(parents=True)
         self.patches = [
@@ -25,6 +29,9 @@ class TestReviewAndPresets(unittest.TestCase):
             patcher.start()
         job_registry.reset()
         self.client = TestClient(app)
+        login = self.client.post("/api/auth/login", json={"username": "owner", "password": "test-password-123"}, headers={"Origin": "http://localhost:5173"})
+        self.assertEqual(login.status_code, 200)
+        self.client.headers.update({"Origin": "http://localhost:5173", "X-CSRF-Token": self.client.cookies.get("clippy_csrf")})
 
     def tearDown(self) -> None:
         job_registry.reset()

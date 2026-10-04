@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from scripts.utils import PROCESSING_TEMP_DIR
+from backend.services.storage import S3Storage, storage
 
 
 JOB_ID_PATTERN = re.compile(r"^[0-9a-fA-F-]{32,36}$")
@@ -101,6 +102,12 @@ class JobRegistry:
         tmp_path = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.replace(path)
+        if isinstance(storage, S3Storage):
+            storage.put_bytes(
+                f"jobs/{record.id}.json",
+                json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8"),
+                "application/json",
+            )
 
     def _delete_record_file(self, job_id: str) -> None:
         path = self._job_path(job_id)
@@ -141,6 +148,15 @@ class JobRegistry:
                 record.stage = "interrupted"
                 record.message = "Interrupted by backend restart."
                 record.updated_at = _now()
+            restored[record.id] = record
+        for key in storage.list_keys("jobs/") if isinstance(storage, S3Storage) else ():
+            if not key.endswith(".json"):
+                continue
+            try:
+                payload = json.loads(storage.get_bytes(key).decode("utf-8"))
+                record = JobRecord.from_dict(payload)
+            except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError):
+                continue
             restored[record.id] = record
         with self._lock:
             self._jobs = restored

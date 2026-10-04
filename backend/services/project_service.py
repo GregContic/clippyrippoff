@@ -8,6 +8,7 @@ from typing import Any
 
 from backend.core import PROJECT_ROOT
 from backend.services.job_registry import job_registry
+from backend.services.storage import S3Storage, storage
 from scripts.utils import OUTPUT_SHORTS_DIR, PROCESSING_TEMP_DIR, get_media_info, run_subprocess
 
 
@@ -57,7 +58,14 @@ def source_path(video_id: str) -> Path | None:
 
 def read_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
-        return None
+        key = _storage_key(path)
+        if key is None or not isinstance(storage, S3Storage) or not storage.exists(key):
+            return None
+        try:
+            payload = json.loads(storage.get_bytes(key).decode("utf-8"))
+            return payload if isinstance(payload, dict) else None
+        except (OSError, ValueError, UnicodeDecodeError):
+            return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -69,6 +77,17 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp_path.replace(path)
+    key = _storage_key(path)
+    if key is not None and isinstance(storage, S3Storage):
+        storage.put_bytes(key, json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8"), "application/json")
+
+
+def _storage_key(path: Path) -> str | None:
+    try:
+        relative = path.resolve().relative_to(PROCESSING_TEMP_DIR.resolve())
+    except ValueError:
+        return None
+    return f"state/{str(relative).replace(chr(92), '/')}"
 
 
 def load_project_metadata(video_id: str) -> dict[str, Any] | None:
@@ -274,6 +293,8 @@ def _ensure_thumbnail_url(video_id: str, metadata: dict[str, Any]) -> str | None
         if not temporary_path.exists() or temporary_path.stat().st_size == 0:
             return None
         temporary_path.replace(thumbnail_path)
+        if isinstance(storage, S3Storage):
+            storage.upload_file(thumbnail_path, f"projects/{video_id}/cache/{thumbnail_path.name}", "image/jpeg")
     except (OSError, RuntimeError, ValueError):
         return None
     return f"/media/cache/{video_id}/{thumbnail_path.name}"

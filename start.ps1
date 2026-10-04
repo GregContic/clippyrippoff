@@ -114,9 +114,9 @@ Write-Host "Frontend:     $FrontendUrl" -ForegroundColor Gray
 Write-Host ''
 Write-Host "Checking backend virtual environment..." -ForegroundColor Yellow
 
-& $VenvPython -c "import fastapi, uvicorn; print('FastAPI', fastapi.__version__); print('Uvicorn', uvicorn.__version__)"
+& $VenvPython -c "import fastapi, uvicorn, argon2; print('FastAPI', fastapi.__version__); print('Uvicorn', uvicorn.__version__); print('Argon2 available')"
 if ($LASTEXITCODE -ne 0) {
-    throw 'The project virtual environment cannot import FastAPI/Uvicorn. Run python -m pip install -r requirements.txt in the repo root.'
+    throw 'The project virtual environment is missing a backend dependency. Run .\.venv\Scripts\python.exe -m pip install -r requirements.txt in the repo root.'
 }
 
 Write-Host "Backend dependencies are available." -ForegroundColor Green

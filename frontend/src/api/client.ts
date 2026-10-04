@@ -14,6 +14,7 @@ import type {
 } from './types';
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
+export type AuthUser = { id: string; username: string };
 
 export function resolveMediaUrl(path?: string | null): string | null {
   if (!path) {
@@ -23,9 +24,12 @@ export function resolveMediaUrl(path?: string | null): string | null {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const csrfToken = document.cookie.split('; ').find((item) => item.startsWith('clippy_csrf='))?.split('=').slice(1).join('=');
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
+      ...(csrfToken ? { 'X-CSRF-Token': decodeURIComponent(csrfToken) } : {}),
       ...(init?.headers ?? {}),
     },
     ...init,
@@ -33,6 +37,9 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
   const text = await response.text();
   if (!response.ok) {
+    if (response.status === 401 && path !== '/api/auth/login') {
+      window.dispatchEvent(new Event('clippy:unauthorized'));
+    }
     let message = text;
     try {
       const parsed = JSON.parse(text) as { detail?: string };
@@ -40,6 +47,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Ignore JSON parse errors and surface the raw message.
     }
+
     throw new Error(message || `Request failed with status ${response.status}`);
   }
 
@@ -47,6 +55,18 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     return undefined as T;
   }
   return JSON.parse(text) as T;
+}
+
+export function login(username: string, password: string): Promise<{ user: AuthUser }> {
+  return requestJson<{ user: AuthUser }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
+}
+
+export function logout(): Promise<void> {
+  return requestJson<void>('/api/auth/logout', { method: 'POST' });
+}
+
+export function getCurrentUser(): Promise<{ user: AuthUser }> {
+  return requestJson<{ user: AuthUser }>('/api/auth/me');
 }
 
 export function analyzeVideo(url: string, forceDownload = false): Promise<AnalyzeResponse> {

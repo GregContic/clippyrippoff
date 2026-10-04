@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from backend.schemas import JobResponse, RenderRequest, RenderResponse, ReviewRequest
 from backend.services.job_registry import job_registry
+from backend.services.storage import storage
 from scripts.utils import OUTPUT_SHORTS_DIR
 from backend.services.render_service import TrimValidationError, delete_render_job, get_render_job, list_render_jobs, retry_render_job, submit_renders
 
@@ -51,7 +52,16 @@ def review_render(render_id: str, request: ReviewRequest) -> JobResponse:
         raise HTTPException(status_code=400, detail="Only completed renders can be reviewed.")
     output_path = record.get("output_path")
     safe_output = (OUTPUT_SHORTS_DIR / Path(output_path).name).resolve() if output_path else None
-    if not output_path or safe_output is None or safe_output.parent != OUTPUT_SHORTS_DIR.resolve() or not safe_output.is_file():
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    output_key = result.get("output_storage_key")
+    local_output_valid = (
+        output_path
+        and safe_output is not None
+        and safe_output.parent == OUTPUT_SHORTS_DIR.resolve()
+        and safe_output.is_file()
+    )
+    remote_output_valid = isinstance(output_key, str) and storage.exists(output_key)
+    if not local_output_valid and not remote_output_valid:
         raise HTTPException(status_code=400, detail="The rendered output file is missing; approval is unavailable.")
     updated = job_registry.update(render_id, review_status=request.status, review_notes=request.notes.strip())
     return JobResponse(**updated.to_dict())

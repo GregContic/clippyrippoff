@@ -18,6 +18,7 @@ from backend.services.project_service import (
 from scripts.detect_clips import detect_candidates
 from scripts.youtube import YouTubeError, cache_paths, download_youtube_video, extract_video_id
 from scripts.utils import FFmpegNotFoundError, TranscriptionError, load_config
+from backend.services.storage import storage
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -93,7 +94,10 @@ def start_analysis(url: str, *, force_download: bool = False) -> AnalyzeResponse
             video_id_local = downloaded["video_id"]
             paths = cache_paths(video_id_local)
             source_path = Path(downloaded["filepath"])
+            source_key = f"projects/{video_id_local}/source/{source_path.name}"
+            storage.upload_file(source_path, source_key, "video/mp4")
             metadata = _project_payload(video_id_local, url, downloaded.get("title"), source_path)
+            metadata["source_storage_key"] = source_key
             metadata.update(
                 {
                     "status": "running",
@@ -122,6 +126,9 @@ def start_analysis(url: str, *, force_download: bool = False) -> AnalyzeResponse
                 "candidates": candidates,
             }
             save_candidates(video_id_local, candidate_payload)
+            if paths["transcript"].is_file():
+                storage.upload_file(paths["transcript"], f"projects/{video_id_local}/transcript.json", "application/json")
+            storage.upload_file(paths["candidates"], f"projects/{video_id_local}/candidates.json", "application/json")
 
             metadata = load_project_metadata(video_id_local) or {}
             metadata.update(
