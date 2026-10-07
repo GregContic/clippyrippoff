@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { FolderKanban, LayoutDashboard, LibraryBig, ListVideo, Search, Settings2 } from 'lucide-react';
+import { CircleHelp, FolderKanban, LayoutDashboard, LibraryBig, ListVideo, Search, Settings2 } from 'lucide-react';
 
 const links = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -8,6 +8,7 @@ const links = [
   { to: '/renders', label: 'Render Queue', icon: ListVideo },
   { to: '/library', label: 'Library', icon: LibraryBig },
   { to: '/settings', label: 'Settings', icon: Settings2 },
+  { to: '/about', label: 'About the project', icon: CircleHelp },
 ];
 
 export function Sidebar() {

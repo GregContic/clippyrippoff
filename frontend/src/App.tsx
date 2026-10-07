@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from './auth';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
@@ -11,6 +11,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { ProjectWorkspacePage } from './pages/ProjectWorkspacePage';
 import { LoginPage } from './pages/LoginPage';
+import { AboutPage } from './pages/AboutPage';
 
 function useRouteTitle(pathname: string) {
   if (pathname === '/' || pathname === '') {
@@ -37,7 +38,29 @@ function useRouteTitle(pathname: string) {
   if (pathname.startsWith('/settings')) {
     return { title: 'Settings', subtitle: 'Read-only project configuration for V1.' };
   }
+  if (pathname.startsWith('/about')) {
+    return { title: 'About the project', subtitle: 'Understand the local workflow behind ClippyRipoff.' };
+  }
   return { title: 'Projects', subtitle: 'Paste a YouTube URL and manage your local video workspaces.' };
+}
+
+function PublicLanding() {
+  return (
+    <div className="min-h-screen bg-surface-950 px-4 text-slate-100 sm:px-6">
+      <header className="mx-auto flex max-w-7xl items-center justify-between border-b border-surface-700 py-5">
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.28em] text-slate-500">ClippyRipoff</div>
+          <div className="mt-1 text-sm font-medium text-white">Local video workspace</div>
+        </div>
+        <Link to="/login">
+          <Button variant="secondary">Sign in</Button>
+        </Link>
+      </header>
+      <main className="mx-auto w-full max-w-7xl py-8 sm:py-12">
+        <AboutPage />
+      </main>
+    </div>
+  );
 }
 
 export function App() {
@@ -49,7 +72,10 @@ export function App() {
     return <div className="flex min-h-screen items-center justify-center bg-surface-950 text-sm text-slate-400">Checking session…</div>;
   }
   if (!user) {
-    return location.pathname === '/login' ? <LoginPage /> : <Navigate to="/login" replace state={{ from: location }} />;
+    if (location.pathname === '/login') {
+      return <LoginPage />;
+    }
+    return location.pathname === '/' ? <PublicLanding /> : <Navigate to="/login" replace state={{ from: location }} />;
   }
   if (location.pathname === '/login') {
     return <Navigate to="/" replace />;
@@ -76,6 +102,7 @@ export function App() {
                 <Route path="/renders" element={<RendersPage />} />
                 <Route path="/library" element={<LibraryPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/about" element={<AboutPage />} />
               </Routes>
             </div>
           </main>
