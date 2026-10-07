@@ -375,6 +375,12 @@ file and FFmpeg. Verify those paths with a real authorized gameplay video.
 - Sophisticated machine-learning video understanding
 ## Storage and deployment
 
+For a Render deployment, create a **Docker** web service with the repository
+root as its root directory and `Dockerfile` as its Dockerfile path. The
+Dockerfile installs FFmpeg and the Python dependencies, and starts Uvicorn on
+Render's `PORT`; leave the build and start commands unset. A native Python
+service cannot use `apt-get` to install FFmpeg.
+
 The backend uses private storage by default. Set `STORAGE_BACKEND=local` (or
 leave it unset) for the existing filesystem workflow. For Render, set
 `STORAGE_BACKEND=r2` and provide the R2 variables shown in
