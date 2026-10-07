@@ -1,0 +1,18 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "$RENDER_BACKEND_URL/api/:path*"
+    },
+    {
+      "source": "/media/:path*",
+      "destination": "$RENDER_BACKEND_URL/media/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
