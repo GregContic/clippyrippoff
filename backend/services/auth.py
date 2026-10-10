@@ -3,19 +3,31 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
-from fastapi import Depends, HTTPException, Request
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from fastapi import HTTPException, Request
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from backend.db import DatabaseConfigurationError, session_factory
+from backend.models import Project, Session as DatabaseSession, User
 
 
 class AuthenticationError(ValueError):
+    pass
+
+
+class DuplicateEmailError(AuthenticationError):
     pass
 
 
@@ -23,31 +35,57 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def normalize_email(email: str) -> str:
+    normalized = email.strip().casefold()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized):
+        raise AuthenticationError("Enter a valid email address.")
+    return normalized
+
+
+def validate_password(password: str) -> str:
+    if len(password) < 12:
+        raise AuthenticationError("Password must contain at least 12 characters.")
+    if len(password) > 1024:
+        raise AuthenticationError("Password must not exceed 1024 characters.")
+    return password
 
 
 @dataclass(frozen=True)
 class Principal:
     id: str
     username: str
+    email: str | None = None
+    role: str = "user"
 
 
 class AuthRepository:
-    """Replaceable persistence boundary for the single-owner account model."""
+    """PostgreSQL auth repository with an explicit filesystem compatibility mode."""
 
     def __init__(self, root: Path | None = None) -> None:
-        self.root = root or Path(os.getenv("AUTH_DATA_DIR", "processing/auth"))
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root = root
+        if root is not None:
+            self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self.password_hasher = PasswordHasher()
 
     @property
     def users_path(self) -> Path:
+        if self.root is None:
+            raise AuthenticationError("Filesystem authentication is not enabled.")
         return self.root / "users.json"
 
     @property
     def sessions_path(self) -> Path:
+        if self.root is None:
+            raise AuthenticationError("Filesystem authentication is not enabled.")
         return self.root / "sessions.json"
 
     def _read(self, path: Path) -> dict[str, Any]:
@@ -65,81 +103,218 @@ class AuthRepository:
         temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         temporary.replace(path)
 
-    def bootstrap(self, username: str, password: str) -> Principal:
-        username = username.strip()
-        if len(username) < 3 or len(username) > 128:
-            raise AuthenticationError("Username must be between 3 and 128 characters.")
-        if len(password) < 12:
-            raise AuthenticationError("Password must contain at least 12 characters.")
-        with self._lock:
-            users = self._read(self.users_path)
-            if users.get("owner") is not None:
-                raise AuthenticationError("The owner account already exists.")
-            principal = {"id": secrets.token_hex(16), "username": username}
-            users["owner"] = {**principal, "password_hash": self.password_hasher.hash(password)}
-            self._write(self.users_path, users)
-            return Principal(**principal)
+    def _db(self) -> Session:
+        return session_factory()()
 
-    def authenticate(self, username: str, password: str) -> Principal | None:
-        with self._lock:
-            owner = self._read(self.users_path).get("owner")
-            if not isinstance(owner, dict) or owner.get("username") != username.strip():
+    def _principal(self, user: User) -> Principal:
+        return Principal(id=str(user.id), username=user.email, email=user.email, role=user.role)
+
+    def register(self, email: str, password: str) -> Principal:
+        normalized_email = normalize_email(email)
+        validate_password(password)
+        if self.root is not None:
+            with self._lock:
+                users = self._read(self.users_path)
+                if any(item.get("email") == normalized_email for item in users.values() if isinstance(item, dict)):
+                    raise DuplicateEmailError("An account with that email already exists.")
+                user_id = secrets.token_hex(16)
+                users[user_id] = {
+                    "id": user_id,
+                    "email": normalized_email,
+                    "username": normalized_email,
+                    "password_hash": self.password_hasher.hash(password),
+                    "role": "user",
+                }
+                self._write(self.users_path, users)
+                return Principal(id=user_id, username=normalized_email, email=normalized_email)
+        db = self._db()
+        try:
+            user = User(email=normalized_email, password_hash=self.password_hasher.hash(password), role="user")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            return self._principal(user)
+        except IntegrityError as exc:
+            db.rollback()
+            raise DuplicateEmailError("An account with that email already exists.") from exc
+        finally:
+            db.close()
+
+    def bootstrap(self, email: str, password: str) -> Principal:
+        validate_password(password)
+        if self.root is not None:
+            email = email.strip()
+            if len(email) < 3 or len(email) > 128:
+                raise AuthenticationError("Email must be between 3 and 128 characters.")
+            with self._lock:
+                users = self._read(self.users_path)
+                if users.get("owner") is not None:
+                    raise AuthenticationError("The owner account already exists.")
+                principal = {"id": secrets.token_hex(16), "username": email, "email": email}
+                users["owner"] = {**principal, "password_hash": self.password_hasher.hash(password)}
+                self._write(self.users_path, users)
+                return Principal(id=principal["id"], username=email, email=email, role="admin")
+        normalized_email = normalize_email(email)
+        db = self._db()
+        try:
+            if db.scalar(select(User.id).limit(1)) is not None:
+                raise AuthenticationError("An account already exists; bootstrap will not overwrite it.")
+            user = User(email=normalized_email, password_hash=self.password_hasher.hash(password), role="admin")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            return self._principal(user)
+        except IntegrityError as exc:
+            db.rollback()
+            raise DuplicateEmailError("An account with that email already exists.") from exc
+        finally:
+            db.close()
+
+    def authenticate(self, identifier: str, password: str) -> Principal | None:
+        if self.root is not None:
+            with self._lock:
+                users = self._read(self.users_path)
+                records = users.values()
+                owner = users.get("owner")
+                if isinstance(owner, dict):
+                    records = [owner]
+                for record in records:
+                    if not isinstance(record, dict):
+                        continue
+                    identity = str(record.get("email") or record.get("username") or "").casefold()
+                    if identity != identifier.strip().casefold():
+                        continue
+                    password_hash = record.get("password_hash")
+                    if not isinstance(password_hash, str):
+                        return None
+                    try:
+                        valid = self.password_hasher.verify(password_hash, password)
+                    except (VerifyMismatchError, VerificationError, InvalidHashError):
+                        return None
+                    if valid:
+                        return Principal(
+                            id=str(record["id"]),
+                            username=str(record.get("email") or record.get("username")),
+                            email=str(record.get("email") or record.get("username")),
+                            role=str(record.get("role", "admin")),
+                        )
                 return None
-            password_hash = owner.get("password_hash")
-            if not isinstance(password_hash, str):
+        db = self._db()
+        try:
+            normalized = normalize_email(identifier)
+        except AuthenticationError:
+            db.close()
+            return None
+        try:
+            user = db.scalar(select(User).where(User.email == normalized, User.is_active.is_(True)))
+            if user is None:
                 return None
             try:
-                valid = self.password_hasher.verify(password_hash, password)
+                valid = self.password_hasher.verify(user.password_hash, password)
             except (VerifyMismatchError, VerificationError, InvalidHashError):
                 return None
-            if not valid:
-                return None
-            return Principal(id=str(owner["id"]), username=str(owner["username"]))
+            return self._principal(user) if valid else None
+        finally:
+            db.close()
 
     def create_session(self, principal: Principal, ttl_seconds: int) -> tuple[str, str]:
         session_token = secrets.token_urlsafe(48)
         csrf_token = secrets.token_urlsafe(32)
-        expires_at = (_now() + timedelta(seconds=ttl_seconds)).isoformat()
-        with self._lock:
-            sessions = self._read(self.sessions_path)
-            sessions[_token_hash(session_token)] = {
-                "user_id": principal.id,
-                "username": principal.username,
-                "csrf_hash": _token_hash(csrf_token),
-                "expires_at": expires_at,
-            }
-            self._write(self.sessions_path, sessions)
-        return session_token, csrf_token
+        expires_at = _now() + timedelta(seconds=ttl_seconds)
+        if self.root is not None:
+            with self._lock:
+                sessions = self._read(self.sessions_path)
+                sessions[_token_hash(session_token)] = {
+                    "user_id": principal.id,
+                    "username": principal.username,
+                    "email": principal.email,
+                    "csrf_hash": _token_hash(csrf_token),
+                    "expires_at": expires_at.isoformat(),
+                }
+                self._write(self.sessions_path, sessions)
+            return session_token, csrf_token
+        db = self._db()
+        try:
+            db.add(DatabaseSession(
+                user_id=UUID(principal.id),
+                token_hash=_token_hash(session_token),
+                csrf_token_hash=_token_hash(csrf_token),
+                expires_at=expires_at,
+            ))
+            db.commit()
+            return session_token, csrf_token
+        finally:
+            db.close()
 
     def get_session(self, session_token: str | None) -> tuple[Principal, dict[str, Any]] | None:
         if not session_token:
             return None
         token_hash = _token_hash(session_token)
-        with self._lock:
-            sessions = self._read(self.sessions_path)
-            session = sessions.get(token_hash)
-            if not isinstance(session, dict):
+        if self.root is not None:
+            with self._lock:
+                sessions = self._read(self.sessions_path)
+                session = sessions.get(token_hash)
+                if not isinstance(session, dict):
+                    return None
+                try:
+                    expired = datetime.fromisoformat(str(session["expires_at"])) <= _now()
+                except (KeyError, TypeError, ValueError):
+                    expired = True
+                if expired:
+                    sessions.pop(token_hash, None)
+                    self._write(self.sessions_path, sessions)
+                    return None
+                principal = Principal(
+                    id=str(session["user_id"]),
+                    username=str(session.get("email") or session["username"]),
+                    email=str(session.get("email") or session["username"]),
+                )
+                return principal, session
+        db = self._db()
+        try:
+            record = db.scalar(select(DatabaseSession).where(DatabaseSession.token_hash == token_hash))
+            if record is None or record.revoked_at is not None or _as_utc(record.expires_at) <= _now():
                 return None
-            try:
-                expired = datetime.fromisoformat(str(session["expires_at"])) <= _now()
-            except (KeyError, TypeError, ValueError):
-                expired = True
-            if expired:
-                sessions.pop(token_hash, None)
-                self._write(self.sessions_path, sessions)
+            user = db.get(User, record.user_id)
+            if user is None or not user.is_active:
                 return None
-            return Principal(id=str(session["user_id"]), username=str(session["username"])), session
+            return self._principal(user), {
+                "csrf_hash": record.csrf_token_hash,
+                "expires_at": record.expires_at,
+            }
+        finally:
+            db.close()
 
     def invalidate(self, session_token: str | None) -> None:
         if not session_token:
             return
-        with self._lock:
-            sessions = self._read(self.sessions_path)
-            sessions.pop(_token_hash(session_token), None)
-            self._write(self.sessions_path, sessions)
+        token_hash = _token_hash(session_token)
+        if self.root is not None:
+            with self._lock:
+                sessions = self._read(self.sessions_path)
+                sessions.pop(token_hash, None)
+                self._write(self.sessions_path, sessions)
+            return
+        db = self._db()
+        try:
+            record = db.scalar(select(DatabaseSession).where(DatabaseSession.token_hash == token_hash))
+            if record is not None:
+                record.revoked_at = _now()
+                db.commit()
+        finally:
+            db.close()
 
     def validate_csrf(self, session: dict[str, Any], csrf_token: str | None) -> bool:
         return bool(csrf_token and secrets.compare_digest(str(session.get("csrf_hash", "")), _token_hash(csrf_token)))
+
+    def owned_project(self, user_id: str, project_id: str) -> Project | None:
+        if self.root is not None:
+            return None
+        db = self._db()
+        try:
+            return db.scalar(select(Project).where(Project.id == UUID(project_id), Project.user_id == UUID(user_id)))
+        finally:
+            db.close()
 
 
 auth_repository = AuthRepository()
@@ -188,7 +363,10 @@ def validate_configuration() -> None:
 
 
 def get_current_user(request: Request) -> Principal:
-    current = auth_repository.get_session(request.cookies.get(cookie_name()))
+    try:
+        current = auth_repository.get_session(request.cookies.get(cookie_name()))
+    except DatabaseConfigurationError as exc:
+        raise HTTPException(status_code=503, detail="Database authentication is not configured.") from exc
     if current is None:
         raise HTTPException(status_code=401, detail="Authentication required.")
     request.state.user = current[0]
@@ -201,9 +379,12 @@ def csrf_protect(request: Request) -> None:
     origin = request.headers.get("origin")
     if not origin or origin.rstrip("/") not in allowed_origins():
         raise HTTPException(status_code=403, detail="Invalid request origin.")
-    if request.url.path == "/api/auth/login":
+    if request.url.path in {"/api/auth/login", "/api/auth/register"}:
         return
-    current = auth_repository.get_session(request.cookies.get(cookie_name()))
+    try:
+        current = auth_repository.get_session(request.cookies.get(cookie_name()))
+    except DatabaseConfigurationError as exc:
+        raise HTTPException(status_code=503, detail="Database authentication is not configured.") from exc
     if current is None:
         raise HTTPException(status_code=401, detail="Authentication required.")
     csrf_cookie = request.cookies.get("clippy_csrf")

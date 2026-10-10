@@ -1,11 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { getCurrentUser, login as loginRequest, logout as logoutRequest, type AuthUser } from './api/client';
+import { getCurrentUser, login as loginRequest, logout as logoutRequest, register as registerRequest, type AuthUser } from './api/client';
 
 type AuthContextValue = {
   user: AuthUser | null;
   loading: boolean;
   error: string | null;
   login: (username: string, password: string) => Promise<void>;
+  register: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
 };
 
@@ -37,6 +38,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(response.user);
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : 'Unable to sign in.';
+        setError(message);
+        throw cause;
+      }
+    },
+    async register(email, password) {
+      setError(null);
+      try {
+        await registerRequest(email, password);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : 'Unable to create account.';
         setError(message);
         throw cause;
       }

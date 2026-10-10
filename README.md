@@ -82,31 +82,75 @@ Terminal 1:
 
 ## Authentication
 
-All API routes except `/api/health` and `/api/auth/login` require the
-server-managed owner session. Passwords use Argon2id-compatible
-`argon2-cffi` hashing; session cookies are HttpOnly and session tokens are
-stored only as hashes. State-changing browser requests also require the
-session-bound CSRF token and an allowed Origin.
+All API routes except `/api/health`, `/api/auth/login`, and
+`/api/auth/register` require the server-managed session. Passwords use
+Argon2id-compatible `argon2-cffi` hashing; session cookies are HttpOnly and
+only hashes of random session tokens are stored. State-changing browser
+requests also require the session-bound CSRF token and an allowed Origin.
+
+Phase 1 stores users and sessions in PostgreSQL through SQLAlchemy 2.x and
+Psycopg 3. The application uses the pooled `DATABASE_URL`; use the direct
+`DATABASE_URL_UNPOOLED` for Alembic migrations. Email addresses are trimmed
+and case-folded before storage, and duplicate registrations are rejected.
+The existing filesystem owner data is not deleted or migrated automatically.
 
 Create the first account once with:
 
 ```powershell
-python scripts/create_owner.py
+.\.venv\Scripts\python.exe scripts/create_admin.py
 ```
 
 The command prompts for credentials and refuses to overwrite an existing
-owner. Never put bootstrap credentials in tracked files. Local development
-uses `AUTH_DATA_DIR=processing/auth` and `AUTH_COOKIE_SECURE=false`.
-Production must use HTTPS, set `AUTH_COOKIE_SECURE=true`, provide exact
-`AUTH_ALLOWED_ORIGINS` values, and place `AUTH_DATA_DIR` on durable private
-storage. The filesystem repository is replaceable; a database-backed
-repository is still required before horizontal scaling or multi-user access.
+owner. Never put bootstrap credentials in tracked files.
 
-Authentication is separate from authorization. This release has one owner, so
-all authenticated projects are in the owner workspace. Before supporting
-multiple users, persist project, render/job, and storage ownership IDs and
-enforce them throughout project, render, library, settings, and media
-services.
+To migrate the existing filesystem owner deliberately, first configure
+`DATABASE_URL`, review the command, and run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/migrate_owner.py
+```
+
+The command asks for a destination email and a new password, leaves
+`processing/auth/users.json` and `sessions.json` untouched, and refuses to
+overwrite a non-empty database. It does not migrate existing sessions.
+
+### Database migrations
+
+Use `DATABASE_URL` for application traffic and the direct
+`DATABASE_URL_UNPOOLED` for schema changes. Review the SQL before applying it:
+
+```powershell
+$env:DATABASE_URL = $env:DATABASE_URL_UNPOOLED
+.\.venv\Scripts\alembic.exe upgrade head --sql > migration.sql
+Get-Content migration.sql
+.\.venv\Scripts\alembic.exe upgrade head
+```
+
+Do not run the final command against production until the generated migration
+has been reviewed and the rollout has been approved. `neon deploy` provisions
+Neon services but does not create these application tables.
+
+For local development, copy `.env.example` to an ignored `.env.local`, replace
+only the placeholders with local or Neon values, then run:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+cd frontend
+npm run dev
+```
+
+Render must provide `DATABASE_URL`, `AUTH_SESSION_TTL_SECONDS`,
+`AUTH_COOKIE_NAME`, `AUTH_COOKIE_SECURE=true`, `AUTH_ALLOWED_ORIGINS` with the
+exact Vercel origin, `APP_ENV=production`, and a durable private
+`AUTH_DATA_DIR` until filesystem project state is migrated. Keep the existing
+R2 variables unchanged.
+
+Authentication is separate from authorization. Phase 1 supports multiple
+database users and sessions, but the existing project, render/job, and
+storage endpoints still read filesystem or in-memory state. They are
+protected by authentication but are not yet ownership-filtered by database
+user. Do not claim project, job, or asset ownership enforcement is complete
+until those endpoints are migrated to the Phase 1 tables.
 
 Terminal 2:
 

@@ -62,6 +62,10 @@ export function login(username: string, password: string): Promise<{ user: AuthU
   return requestJson<{ user: AuthUser }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
 }
 
+export function register(email: string, password: string): Promise<{ user: AuthUser }> {
+  return requestJson<{ user: AuthUser }>('/api/auth/register', { method: 'POST', body: JSON.stringify({ email, password }) });
+}
+
 export function logout(): Promise<void> {
   return requestJson<void>('/api/auth/logout', { method: 'POST' });
 }
