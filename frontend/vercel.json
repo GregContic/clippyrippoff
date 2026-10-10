@@ -4,11 +4,11 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "$RENDER_BACKEND_URL/api/:path*"
+      "destination": "https://clippyrippoff.onrender.com/api/:path*"
     },
     {
       "source": "/media/:path*",
-      "destination": "$RENDER_BACKEND_URL/media/:path*"
+      "destination": "https://clippyrippoff.onrender.com/media/:path*"
     },
     {
       "source": "/(.*)",
