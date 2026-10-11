@@ -1,12 +1,14 @@
 import { Card } from './ui';
 
 const steps = [
+  { key: 'queued', label: 'Queued' },
   { key: 'preparing', label: 'Preparing' },
   { key: 'downloading', label: 'Downloading' },
+  { key: 'uploading', label: 'Uploading' },
   { key: 'transcribing', label: 'Transcribing' },
-  { key: 'detecting', label: 'Detecting moments' },
-  { key: 'ranking', label: 'Ranking candidates' },
-  { key: 'complete', label: 'Complete' },
+  { key: 'detecting', label: 'Detecting Highlights' },
+  { key: 'ranking', label: 'Detecting Highlights' },
+  { key: 'complete', label: 'Completed' },
 ];
 
 export function AnalysisProgress({ stage, message, status }: { stage?: string | null; message?: string | null; status: string }) {

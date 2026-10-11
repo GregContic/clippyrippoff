@@ -3,10 +3,15 @@ from __future__ import annotations
 import os
 from collections.abc import Generator
 from functools import lru_cache
+from pathlib import Path
 
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env.local", override=False)
 
 
 class DatabaseConfigurationError(RuntimeError):

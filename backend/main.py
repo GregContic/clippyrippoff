@@ -15,7 +15,7 @@ from backend.api.renders import router as renders_router
 from backend.api.settings import router as settings_router
 from backend.api.videos import router as videos_router
 from backend.services.job_registry import job_registry
-from backend.services.auth import allowed_origins, csrf_protect, get_current_user, validate_configuration
+from backend.services.auth import allowed_origins, csrf_protect, enforce_project_ownership, get_current_user, validate_configuration
 from scripts.utils import ensure_directories
 
 app = FastAPI(title="ClippyRipoff API", version="1.0.0")
@@ -39,7 +39,7 @@ async def csrf_middleware(request: Request, call_next):
         raise
     return await call_next(request)
 
-protected_dependency = [Depends(get_current_user)]
+protected_dependency = [Depends(get_current_user), Depends(enforce_project_ownership)]
 app.include_router(videos_router, dependencies=protected_dependency)
 app.include_router(projects_router, dependencies=protected_dependency)
 app.include_router(candidates_router, dependencies=protected_dependency)

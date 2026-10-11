@@ -6,6 +6,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.db import DatabaseConfigurationError
 from backend.services.auth import AuthRepository
 
 
@@ -30,6 +31,21 @@ class TestAuthentication(unittest.TestCase):
         self.assertNotIn("password", response.text)
         self.assertNotIn("password_hash", response.text)
         self.assertIn("HttpOnly", response.headers["set-cookie"])
+
+    def test_login_reports_unconfigured_database(self):
+        repository = __import__("backend.services.auth", fromlist=["auth_repository"]).auth_repository
+        with patch.object(
+            repository,
+            "authenticate",
+            side_effect=DatabaseConfigurationError("DATABASE_URL is required for PostgreSQL-backed authentication."),
+        ):
+            response = self.client.post(
+                "/api/auth/login",
+                json={"email": "owner@example.com", "password": "strong-password-123"},
+                headers={"Origin": "http://localhost:5173"},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {"detail": "Database authentication is not configured."})
 
     def test_protected_routes_require_session(self):
         protected_paths = [

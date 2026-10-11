@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from backend.services.project_service import load_project_metadata
+from backend.services.project_service import load_project_metadata, output_owner_id
 from backend.services.storage import storage
 from scripts.utils import OUTPUT_SHORTS_DIR, PROCESSING_TEMP_DIR
 
@@ -52,8 +52,11 @@ def get_render_media(video_id: str, filename: str):
 
 @router.get("/api/media/shorts/{filename}")
 @router.get("/media/shorts/{filename}")
-def get_legacy_render_media(filename: str):
+def get_legacy_render_media(filename: str, request: Request):
     filename = _safe_name(filename)
+    owner_id = output_owner_id(filename)
+    if owner_id is not None and owner_id != request.state.user.id:
+        raise HTTPException(status_code=404, detail="Rendered media not found.")
     local = OUTPUT_SHORTS_DIR / filename
     if local.is_file():
         return FileResponse(local, media_type="video/mp4")

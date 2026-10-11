@@ -175,9 +175,6 @@ class AuthRepository:
             with self._lock:
                 users = self._read(self.users_path)
                 records = users.values()
-                owner = users.get("owner")
-                if isinstance(owner, dict):
-                    records = [owner]
                 for record in records:
                     if not isinstance(record, dict):
                         continue
@@ -371,6 +368,25 @@ def get_current_user(request: Request) -> Principal:
         raise HTTPException(status_code=401, detail="Authentication required.")
     request.state.user = current[0]
     return current[0]
+
+
+def enforce_project_ownership(request: Request) -> None:
+    principal = getattr(request.state, "user", None)
+    if principal is None:
+        return
+    video_id = request.path_params.get("video_id")
+    if video_id is None and request.path_params.get("render_id"):
+        from backend.services.job_registry import job_registry
+
+        record = job_registry.get(str(request.path_params["render_id"]))
+        video_id = record.video_id if record is not None else None
+    if video_id is None:
+        return
+    from backend.services.project_service import project_owner_id
+
+    owner_id = project_owner_id(str(video_id))
+    if owner_id is not None and owner_id != principal.id:
+        raise HTTPException(status_code=404, detail="Project not found.")
 
 
 def csrf_protect(request: Request) -> None:

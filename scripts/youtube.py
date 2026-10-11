@@ -7,7 +7,9 @@ It does not transcribe, detect, render, publish, or bypass access controls.
 from __future__ import annotations
 
 import logging
+import random
 import re
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -19,7 +21,7 @@ _VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,}$")
 _LOGGER = logging.getLogger(__name__)
 BOT_CHALLENGE_MESSAGE = (
     "YouTube requires sign-in verification before this video can be downloaded. "
-    "Analysis failed; try again later."
+    "Analysis failed; try again later or use the Upload video option."
 )
 
 
@@ -33,6 +35,22 @@ class InvalidYouTubeURLError(YouTubeError):
 
 class YouTubeBotChallengeError(YouTubeError):
     """Raised when YouTube blocks extraction with a bot-verification challenge."""
+
+
+class YouTubeRateLimitError(YouTubeError):
+    """Raised when YouTube rate-limits extraction."""
+
+
+class YouTubeUnavailableError(YouTubeError):
+    """Raised when a video is private, removed, or otherwise unavailable."""
+
+
+class YouTubeNetworkError(YouTubeError):
+    """Raised when extraction fails because of a transient network error."""
+
+
+class YouTubeStorageError(YouTubeError):
+    """Raised when the downloaded source cannot be stored locally."""
 
 
 def _safe_diagnostic(message: str) -> str:
@@ -102,6 +120,35 @@ def _load_yt_dlp():
     return yt_dlp
 
 
+def _classify_extraction_error(exc: Exception) -> YouTubeError:
+    message = str(exc).casefold()
+    if "sign in to confirm" in message and "not a bot" in message:
+        return YouTubeBotChallengeError(BOT_CHALLENGE_MESSAGE)
+    if any(marker in message for marker in ("http error 429", "too many requests", "rate limit")):
+        return YouTubeRateLimitError(
+            "YouTube is rate-limiting this request. Wait a few minutes and try again, or upload the video directly."
+        )
+    if any(marker in message for marker in ("private video", "video unavailable", "members-only", "copyright owner")):
+        return YouTubeUnavailableError(
+            "This YouTube video is private, unavailable, or restricted. Check access or upload an authorized copy."
+        )
+    if any(marker in message for marker in ("timed out", "timeout", "temporary failure", "connection reset", "connection aborted", "name or service not known")):
+        return YouTubeNetworkError(
+            "The YouTube request timed out or failed temporarily. Check the connection and try again."
+        )
+    return YouTubeError(
+        "The YouTube video could not be accessed. Check that it is public and try again later."
+    )
+
+
+def _is_retryable(exc: Exception) -> bool:
+    return isinstance(exc, (YouTubeRateLimitError, YouTubeNetworkError))
+
+
+def _retry_delay(attempt: int) -> float:
+    return min(8.0, 1.0 * (2 ** attempt)) + random.uniform(0.0, 0.5)
+
+
 def download_youtube_video(
     url: str,
     output_dir: Path | None = None,
@@ -145,29 +192,29 @@ def download_youtube_video(
         "logger": _YouTubeDLLogger(),
         "progress_hooks": [_progress_hook],
     }
-    try:
-        with yt_dlp.YoutubeDL(options) as downloader:
-            info = downloader.extract_info(url, download=True)
-    except Exception as exc:
-        diagnostic = _safe_diagnostic(str(exc))
-        _LOGGER.warning(
-            "YouTube extraction failed for video %s (%s): %s",
-            video_id,
-            type(exc).__name__,
-            diagnostic,
-        )
-        normalized_error = str(exc).casefold()
-        if "sign in to confirm" in normalized_error and "not a bot" in normalized_error:
-            raise YouTubeBotChallengeError(BOT_CHALLENGE_MESSAGE) from None
-        raise YouTubeError(
-            "The YouTube video could not be accessed. Check that it is public "
-            "and try again later."
-        ) from None
+    info: dict[str, Any] | None = None
+    for attempt in range(2):
+        try:
+            with yt_dlp.YoutubeDL(options) as downloader:
+                info = downloader.extract_info(url, download=True)
+            break
+        except Exception as exc:
+            classified = _classify_extraction_error(exc)
+            _LOGGER.warning(
+                "YouTube extraction failed for video %s (attempt %d, %s): %s",
+                video_id,
+                attempt + 1,
+                type(classified).__name__,
+                _safe_diagnostic(str(exc)),
+            )
+            if not _is_retryable(classified) or attempt == 1:
+                raise classified from None
+            time.sleep(_retry_delay(attempt))
 
     source = _cached_source(cache_dir)
     if source is None:
-        raise YouTubeError("Download completed but no readable source video was created.")
-    title = str(info.get("title") or video_id)
+        raise YouTubeStorageError("Download completed but no readable source video was created.")
+    title = str((info or {}).get("title") or video_id)
     try:
         import json
         metadata_path.write_text(

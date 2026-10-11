@@ -139,6 +139,16 @@ cd frontend
 npm run dev
 ```
 
+The backend loads `.env.local` automatically without overriding environment
+variables supplied by the deployment or shell.
+
+If YouTube blocks extraction, the Analyze page also accepts direct video
+uploads (`.mp4`, `.mkv`, `.mov`, `.webm`, `.m4v`, or `.avi`). Set
+`MAX_UPLOAD_BYTES` to cap uploads (2 GiB by default). In deployments using
+`STORAGE_BACKEND=r2`, uploaded sources and generated analysis artifacts are
+stored in Cloudflare R2 rather than relying on Render's ephemeral filesystem.
+The temporary upload is removed after ingestion.
+
 Render must provide `DATABASE_URL`, `AUTH_SESSION_TTL_SECONDS`,
 `AUTH_COOKIE_NAME`, `AUTH_COOKIE_SECURE=true`, `AUTH_ALLOWED_ORIGINS` with the
 exact Vercel origin, `APP_ENV=production`, and a durable private

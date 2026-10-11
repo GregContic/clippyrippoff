@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { analyzeVideo, listProjects } from '../api/client';
+import { analyzeVideo, listProjects, uploadVideo } from '../api/client';
 import type { ProjectSummary } from '../api/types';
 import { formatDate, formatDuration } from '../lib/format';
 import { Badge, Button, Card, EmptyState } from '../components/ui';
@@ -38,6 +38,19 @@ export function AnalyzePage() {
 			setError('Paste a supported video URL first.');
 			return;
 		}
+
+		async function handleUpload(file: File) {
+			setLoading(true);
+			setError(null);
+			try {
+				const response = await uploadVideo(file);
+				navigate(`/projects/${response.video_id}`);
+			} catch (cause) {
+				setError(cause instanceof Error ? cause.message : 'Unable to upload the video.');
+			} finally {
+				setLoading(false);
+			}
+		}
 		setLoading(true);
 		setError(null);
 		try {
@@ -63,7 +76,7 @@ export function AnalyzePage() {
 							<p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">Paste a YouTube URL, launch detection, then continue in the project workspace where candidates, trims, captions, and renders are managed.</p>
 						</div>
 						<div className="space-y-3">
-							<UrlInput value={url} onChange={setUrl} onSubmit={handleAnalyze} loading={loading} />
+							<UrlInput value={url} onChange={setUrl} onSubmit={handleAnalyze} onUpload={handleUpload} loading={loading} />
 							{error ? <p className="text-sm text-danger-100">{error}</p> : <p className="text-sm text-slate-400">Analysis runs locally and opens the resulting project workspace when it completes.</p>}
 						</div>
 					</div>

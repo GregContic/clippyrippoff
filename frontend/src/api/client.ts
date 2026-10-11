@@ -81,6 +81,32 @@ export function analyzeVideo(url: string, forceDownload = false): Promise<Analyz
   });
 }
 
+export function uploadVideo(file: File): Promise<AnalyzeResponse> {
+  const form = new FormData();
+  form.append('file', file);
+  return fetch(`${API_BASE_URL}/api/videos/upload`, {
+    method: 'POST',
+    body: form,
+    credentials: 'include',
+    headers: (() => {
+      const csrfToken = document.cookie.split('; ').find((item) => item.startsWith('clippy_csrf='))?.split('=').slice(1).join('=');
+      return csrfToken ? { 'X-CSRF-Token': decodeURIComponent(csrfToken) } : {};
+    })(),
+  }).then(async (response) => {
+    const text = await response.text();
+    if (!response.ok) {
+      let message = text;
+      try {
+        message = (JSON.parse(text) as { detail?: string }).detail ?? message;
+      } catch {
+        // Surface non-JSON server errors as-is.
+      }
+      throw new Error(message || `Request failed with status ${response.status}`);
+    }
+    return JSON.parse(text) as AnalyzeResponse;
+  });
+}
+
 export function listVideos(): Promise<{ items: ProjectSummary[] }> {
   return requestJson<{ items: ProjectSummary[] }>('/api/videos');
 }
