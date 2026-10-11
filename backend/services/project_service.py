@@ -94,6 +94,19 @@ def load_project_metadata(video_id: str) -> dict[str, Any] | None:
     return read_json(metadata_path(video_id))
 
 
+def project_owner_id(video_id: str) -> str | None:
+    metadata = load_project_metadata(video_id)
+    owner_id = metadata.get("owner_id") if metadata else None
+    return owner_id if isinstance(owner_id, str) and owner_id else None
+
+
+def output_owner_id(filename: str) -> str | None:
+    for job in job_registry.list():
+        if job.output_path and Path(job.output_path).name == filename and job.video_id:
+            return project_owner_id(job.video_id)
+    return None
+
+
 def save_project_metadata(video_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     data = dict(payload)
     data.setdefault("video_id", video_id)
@@ -338,7 +351,9 @@ def _latest_timestamp(*values: str | None) -> str | None:
     return max(parsed).isoformat()
 
 
-def project_render_jobs(video_id: str) -> list[dict[str, Any]]:
+def project_render_jobs(video_id: str, *, owner_id: str) -> list[dict[str, Any]]:
+    if project_owner_id(video_id) != owner_id:
+        return []
     jobs = _render_jobs_for_video(video_id)
     return [job.to_dict() for job in jobs]
 
@@ -592,7 +607,7 @@ def project_summary(video_id: str) -> dict[str, Any] | None:
     return summary
 
 
-def list_projects(limit: int = 25) -> list[dict[str, Any]]:
+def list_projects(limit: int = 25, owner_id: str | None = None) -> list[dict[str, Any]]:
     if not PROJECT_CACHE_DIR.exists():
         return []
     items: list[dict[str, Any]] = []
@@ -602,6 +617,8 @@ def list_projects(limit: int = 25) -> list[dict[str, Any]]:
         except (OSError, ValueError):
             continue
         try:
+            if owner_id is not None and project_owner_id(metadata_file.parent.name) not in {None, owner_id}:
+                continue
             summary = project_summary(metadata_file.parent.name)
         except ValueError:
             continue
@@ -621,7 +638,7 @@ def safe_output_path(filename: str) -> Path:
     return candidate
 
 
-def list_library_items() -> list[dict[str, Any]]:
+def list_library_items(owner_id: str | None = None) -> list[dict[str, Any]]:
     if not OUTPUT_SHORTS_DIR.exists():
         return []
     items: list[dict[str, Any]] = []
@@ -638,6 +655,10 @@ def list_library_items() -> list[dict[str, Any]]:
             info = {"duration": None}
         stat = path.stat()
         job = jobs_by_filename.get(path.name)
+        if owner_id is not None and job is not None and job.video_id is not None:
+            project_owner = project_owner_id(job.video_id)
+            if project_owner is not None and project_owner != owner_id:
+                continue
         items.append(
             {
                 "filename": path.name,
@@ -652,8 +673,14 @@ def list_library_items() -> list[dict[str, Any]]:
     return items
 
 
-def delete_library_item(filename: str) -> None:
+def delete_library_item(filename: str, owner_id: str | None = None) -> None:
     path = safe_output_path(filename)
     if not path.exists():
         raise FileNotFoundError(filename)
+    if owner_id is not None:
+        for job in job_registry.list():
+            if job.output_path and Path(job.output_path).name == filename and job.video_id:
+                project_owner = project_owner_id(job.video_id)
+                if project_owner is not None and project_owner != owner_id:
+                    raise FileNotFoundError(filename)
     path.unlink()

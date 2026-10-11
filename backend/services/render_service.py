@@ -289,13 +289,25 @@ def submit_renders(
     return job_ids
 
 
-def list_render_jobs() -> list[dict]:
-    return [record.to_dict() for record in job_registry.list() if record.kind == "render"]
+def list_render_jobs(owner_id: str) -> list[dict]:
+    from backend.services.project_service import project_owner_id
+
+    return [
+        record.to_dict()
+        for record in job_registry.list()
+        if record.kind == "render"
+        and record.video_id
+        and project_owner_id(record.video_id) == owner_id
+    ]
 
 
-def get_render_job(job_id: str) -> dict | None:
+def get_render_job(job_id: str, *, owner_id: str) -> dict | None:
     record = job_registry.get(job_id)
     if record is None or record.kind != "render":
+        return None
+    from backend.services.project_service import project_owner_id
+
+    if not record.video_id or project_owner_id(record.video_id) != owner_id:
         return None
     return record.to_dict()
 

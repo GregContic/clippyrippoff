@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from backend.schemas import JobResponse, RenderRequest, RenderResponse, ReviewRequest
 from backend.services.job_registry import job_registry
@@ -31,21 +31,21 @@ def render_candidates(video_id: str, request: RenderRequest) -> RenderResponse:
 
 
 @router.get("/renders", response_model=list[JobResponse])
-def get_renders() -> list[JobResponse]:
-    return [JobResponse(**item) for item in list_render_jobs()]
+def get_renders(request: Request) -> list[JobResponse]:
+    return [JobResponse(**item) for item in list_render_jobs(request.state.user.id)]
 
 
 @router.get("/renders/{render_id}", response_model=JobResponse)
-def get_render(render_id: str) -> JobResponse:
-    record = get_render_job(render_id)
+def get_render(render_id: str, request: Request) -> JobResponse:
+    record = get_render_job(render_id, owner_id=request.state.user.id)
     if record is None:
         raise HTTPException(status_code=404, detail="Render job not found.")
     return JobResponse(**record)
 
 
 @router.patch("/renders/{render_id}/review", response_model=JobResponse)
-def review_render(render_id: str, request: ReviewRequest) -> JobResponse:
-    record = get_render_job(render_id)
+def review_render(render_id: str, review_request: ReviewRequest, request: Request) -> JobResponse:
+    record = get_render_job(render_id, owner_id=request.state.user.id)
     if record is None:
         raise HTTPException(status_code=404, detail="Render job not found.")
     if record.get("status") != "completed":
@@ -63,12 +63,18 @@ def review_render(render_id: str, request: ReviewRequest) -> JobResponse:
     remote_output_valid = isinstance(output_key, str) and storage.exists(output_key)
     if not local_output_valid and not remote_output_valid:
         raise HTTPException(status_code=400, detail="The rendered output file is missing; approval is unavailable.")
-    updated = job_registry.update(render_id, review_status=request.status, review_notes=request.notes.strip())
+    updated = job_registry.update(
+        render_id,
+        review_status=review_request.status,
+        review_notes=review_request.notes.strip(),
+    )
     return JobResponse(**updated.to_dict())
 
 
 @router.delete("/renders/{render_id}")
-def remove_render(render_id: str) -> dict[str, str]:
+def remove_render(render_id: str, request: Request) -> dict[str, str]:
+    if get_render_job(render_id, owner_id=request.state.user.id) is None:
+        raise HTTPException(status_code=404, detail="Render job not found.")
     try:
         removed = delete_render_job(render_id)
     except ValueError as exc:
@@ -79,12 +85,14 @@ def remove_render(render_id: str) -> dict[str, str]:
 
 
 @router.post("/renders/{render_id}/retry", response_model=RenderResponse)
-def retry_render(render_id: str) -> RenderResponse:
+def retry_render(render_id: str, request: Request) -> RenderResponse:
+    if get_render_job(render_id, owner_id=request.state.user.id) is None:
+        raise HTTPException(status_code=404, detail="Render job not found.")
     try:
         job_ids = retry_render_job(render_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    record = get_render_job(render_id)
+    record = get_render_job(render_id, owner_id=request.state.user.id)
     return RenderResponse(video_id=record.get("video_id") if record else "", render_job_ids=job_ids)

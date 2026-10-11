@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.services import caption_preset_service
+from backend.services import project_service
 from backend.services.job_registry import job_registry
 from backend.services.auth import auth_repository
 
@@ -24,6 +26,7 @@ class TestReviewAndPresets(unittest.TestCase):
             patch("backend.api.renders.OUTPUT_SHORTS_DIR", self.output),
             patch.object(job_registry, "storage_dir", self.root / "jobs"),
             patch.object(caption_preset_service, "PRESETS_PATH", self.root / "caption_presets.json"),
+            patch.object(project_service, "PROJECT_CACHE_DIR", self.root / "cache"),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -31,6 +34,13 @@ class TestReviewAndPresets(unittest.TestCase):
         self.client = TestClient(app)
         login = self.client.post("/api/auth/login", json={"username": "owner", "password": "test-password-123"}, headers={"Origin": "http://localhost:5173"})
         self.assertEqual(login.status_code, 200)
+        self.owner_id = login.json()["user"]["id"]
+        project_dir = self.root / "cache" / "owned-project"
+        project_dir.mkdir(parents=True)
+        (project_dir / "metadata.json").write_text(
+            json.dumps({"video_id": "owned-project", "owner_id": self.owner_id}),
+            encoding="utf-8",
+        )
         self.client.headers.update({"Origin": "http://localhost:5173", "X-CSRF-Token": self.client.cookies.get("clippy_csrf")})
 
     def tearDown(self) -> None:
@@ -40,7 +50,7 @@ class TestReviewAndPresets(unittest.TestCase):
         self.tempdir.cleanup()
 
     def test_review_requires_completed_job_and_existing_output(self) -> None:
-        job = job_registry.create("render")
+        job = job_registry.create("render", video_id="owned-project")
         job_registry.update(job.id, status="running", output_path=str(self.output / "short.mp4"))
         response = self.client.patch(f"/api/renders/{job.id}/review", json={"status": "approved"})
         self.assertEqual(response.status_code, 400)

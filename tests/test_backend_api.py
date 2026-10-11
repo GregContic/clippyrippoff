@@ -48,6 +48,7 @@ class TestBackendApi(unittest.TestCase):
         self.client = TestClient(app)
         login = self.client.post("/api/auth/login", json={"username": "owner", "password": "test-password-123"}, headers={"Origin": "http://localhost:5173"})
         self.assertEqual(login.status_code, 200)
+        self.owner_id = login.json()["user"]["id"]
         self.client.headers.update({"Origin": "http://localhost:5173", "X-CSRF-Token": self.client.cookies.get("clippy_csrf")})
 
     def tearDown(self) -> None:
@@ -56,7 +57,8 @@ class TestBackendApi(unittest.TestCase):
         job_registry.reset()
         self.tempdir.cleanup()
 
-    def _create_project(self, video_id: str = "abc123XYZ_1") -> Path:
+    def _create_project(self, video_id: str = "abc123XYZ_1", owner_id: str | None = None) -> Path:
+        owner_id = self.owner_id if owner_id is None else owner_id
         project_dir = self.cache_root / video_id
         project_dir.mkdir(parents=True, exist_ok=True)
         (project_dir / "metadata.json").write_text(
@@ -71,6 +73,7 @@ class TestBackendApi(unittest.TestCase):
                     "candidate_count": 1,
                     "rendered_count": 0,
                     "source_path": str(project_dir / "source.mp4"),
+                    **({"owner_id": owner_id} if owner_id is not None else {}),
                 },
                 indent=2,
             ),
@@ -126,6 +129,23 @@ class TestBackendApi(unittest.TestCase):
         )
         (project_dir / "source.mp4").write_bytes(b"fake-video")
         return project_dir
+
+    def _authenticated_client(self, email: str, password: str) -> TestClient:
+        auth_repository.register(email, password)
+        client = TestClient(app)
+        login = client.post(
+            "/api/auth/login",
+            json={"username": email, "password": password},
+            headers={"Origin": "http://localhost:5173"},
+        )
+        self.assertEqual(login.status_code, 200)
+        client.headers.update(
+            {
+                "Origin": "http://localhost:5173",
+                "X-CSRF-Token": client.cookies.get("clippy_csrf"),
+            }
+        )
+        return client
 
     @staticmethod
     def _wait_for(condition, timeout: float = 2.0) -> None:
@@ -491,6 +511,40 @@ class TestBackendApi(unittest.TestCase):
     def test_render_queue_missing_job_returns_404(self) -> None:
         response = self.client.get("/api/renders/does-not-exist")
         self.assertEqual(response.status_code, 404)
+
+    def test_render_jobs_are_scoped_to_verified_project_owners(self) -> None:
+        other_client = self._authenticated_client("other@example.com", "other-password-123")
+        other_id = other_client.get("/api/auth/me").json()["user"]["id"]
+        self._create_project("owner-project", owner_id=self.owner_id)
+        self._create_project("other-project", owner_id=other_id)
+        self._create_project("unowned-project", owner_id="")
+
+        owner_job = job_registry.create("render", video_id="owner-project")
+        other_job = job_registry.create("render", video_id="other-project")
+        unowned_job = job_registry.create("render", video_id="unowned-project")
+        missing_project_job = job_registry.create("render", video_id="missing-project")
+        job_registry.update(owner_job.id, status="completed")
+
+        owner_jobs = self.client.get("/api/renders")
+        self.assertEqual(owner_jobs.status_code, 200)
+        self.assertEqual([job["id"] for job in owner_jobs.json()], [owner_job.id])
+
+        other_jobs = other_client.get("/api/renders")
+        self.assertEqual(other_jobs.status_code, 200)
+        self.assertEqual([job["id"] for job in other_jobs.json()], [other_job.id])
+
+        self.assertEqual(self.client.get(f"/api/renders/{owner_job.id}").status_code, 200)
+        self.assertEqual(other_client.get(f"/api/renders/{owner_job.id}").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/renders/{unowned_job.id}").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/renders/{missing_project_job.id}").status_code, 404)
+
+        project_renders = self.client.get("/api/projects/owner-project/renders")
+        self.assertEqual(project_renders.status_code, 200)
+        self.assertEqual([job["id"] for job in project_renders.json()], [owner_job.id])
+        self.assertEqual(other_client.get("/api/projects/owner-project/renders").status_code, 404)
+
+        self.assertEqual(self.client.delete(f"/api/renders/{owner_job.id}").status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/renders/{other_job.id}").status_code, 404)
 
     def test_render_history_restores_completed_jobs_and_marks_active_jobs_interrupted(self) -> None:
         self._create_project()
