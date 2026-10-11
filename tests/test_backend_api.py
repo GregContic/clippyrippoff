@@ -9,10 +9,12 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.main import app
+import backend.services.analysis_service as analysis_service
 import backend.services.project_service as project_service
 import backend.services.render_service as render_service
 from backend.services.job_registry import job_registry
 from backend.services.auth import auth_repository
+from scripts.youtube import BOT_CHALLENGE_MESSAGE, YouTubeBotChallengeError
 
 
 class TestBackendApi(unittest.TestCase):
@@ -148,6 +150,32 @@ class TestBackendApi(unittest.TestCase):
         response = self.client.post("/api/videos/analyze", json={"url": "https://example.com/watch?v=abc"})
         self.assertEqual(response.status_code, 400)
         self.assertIn("Invalid YouTube URL", response.json()["detail"])
+
+    def test_bot_challenge_marks_analysis_job_and_project_failed(self) -> None:
+        with patch.object(
+            analysis_service,
+            "download_youtube_video",
+            side_effect=YouTubeBotChallengeError(BOT_CHALLENGE_MESSAGE),
+        ):
+            response = self.client.post(
+                "/api/videos/analyze",
+                json={"url": "https://youtu.be/abc123XYZ_1"},
+            )
+            self.assertEqual(response.status_code, 200)
+            job_id = response.json()["job_id"]
+            self._wait_for_job_completion(job_id)
+
+        job_response = self.client.get("/api/videos/abc123XYZ_1/job")
+        project_response = self.client.get("/api/videos/abc123XYZ_1")
+        self.assertEqual(job_response.status_code, 200)
+        self.assertEqual(job_response.json()["status"], "failed")
+        self.assertEqual(job_response.json()["stage"], "failed")
+        self.assertEqual(job_response.json()["message"], BOT_CHALLENGE_MESSAGE)
+        self.assertEqual(job_response.json()["error"], BOT_CHALLENGE_MESSAGE)
+        self.assertEqual(project_response.status_code, 200)
+        self.assertEqual(project_response.json()["status"], "failed")
+        self.assertEqual(project_response.json()["analysis_stage"], "failed")
+        self.assertEqual(project_response.json()["message"], BOT_CHALLENGE_MESSAGE)
 
     def test_candidate_retrieval_returns_cached_candidates(self) -> None:
         self._create_project()

@@ -425,6 +425,13 @@ Dockerfile installs FFmpeg and the Python dependencies, and starts Uvicorn on
 Render's `PORT`; leave the build and start commands unset. A native Python
 service cannot use `apt-get` to install FFmpeg.
 
+The container also includes Node.js 22 and installs `yt-dlp[default]` with its
+YouTube JavaScript challenge scripts. Rebuild and redeploy the Docker service
+after updating this configuration. This supplies yt-dlp's documented runtime
+requirements but does not guarantee that YouTube will permit downloads from
+Render's IP address; bot-verification failures are reported as failed analysis
+jobs rather than continuing to appear in progress.
+
 The backend uses private storage by default. Set `STORAGE_BACKEND=local` (or
 leave it unset) for the existing filesystem workflow. For Render, set
 `STORAGE_BACKEND=r2` and provide the R2 variables shown in

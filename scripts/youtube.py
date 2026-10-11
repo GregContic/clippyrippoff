@@ -6,6 +6,7 @@ It does not transcribe, detect, render, publish, or bypass access controls.
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,11 @@ from utils import PROCESSING_TEMP_DIR
 
 YOUTUBE_CACHE_DIR = PROCESSING_TEMP_DIR / "youtube"
 _VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,}$")
+_LOGGER = logging.getLogger(__name__)
+BOT_CHALLENGE_MESSAGE = (
+    "YouTube requires sign-in verification before this video can be downloaded. "
+    "Analysis failed; try again later."
+)
 
 
 class YouTubeError(RuntimeError):
@@ -23,6 +29,31 @@ class YouTubeError(RuntimeError):
 
 class InvalidYouTubeURLError(YouTubeError):
     """Raised when a URL is not a supported YouTube URL."""
+
+
+class YouTubeBotChallengeError(YouTubeError):
+    """Raised when YouTube blocks extraction with a bot-verification challenge."""
+
+
+def _safe_diagnostic(message: str) -> str:
+    message = re.sub(r"(https?://[^\s?#]+)\?[^\s#]*", r"\1?[REDACTED]", message)
+    message = re.sub(
+        r"(?i)\b(cookie|authorization|token|password|api[_-]?key)\b\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
+        r"\1=[REDACTED]",
+        message,
+    )
+    return message[:500]
+
+
+class _YouTubeDLLogger:
+    def debug(self, message: str) -> None:
+        _LOGGER.debug("yt-dlp: %s", _safe_diagnostic(str(message)))
+
+    def warning(self, message: str) -> None:
+        _LOGGER.warning("yt-dlp: %s", _safe_diagnostic(str(message)))
+
+    def error(self, message: str) -> None:
+        _LOGGER.error("yt-dlp: %s", _safe_diagnostic(str(message)))
 
 
 def extract_video_id(url: str) -> str:
@@ -110,17 +141,28 @@ def download_youtube_video(
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "js_runtimes": {"node": {}},
+        "logger": _YouTubeDLLogger(),
         "progress_hooks": [_progress_hook],
     }
     try:
         with yt_dlp.YoutubeDL(options) as downloader:
             info = downloader.extract_info(url, download=True)
     except Exception as exc:
+        diagnostic = _safe_diagnostic(str(exc))
+        _LOGGER.warning(
+            "YouTube extraction failed for video %s (%s): %s",
+            video_id,
+            type(exc).__name__,
+            diagnostic,
+        )
+        normalized_error = str(exc).casefold()
+        if "sign in to confirm" in normalized_error and "not a bot" in normalized_error:
+            raise YouTubeBotChallengeError(BOT_CHALLENGE_MESSAGE) from None
         raise YouTubeError(
-            "The YouTube video could not be accessed. Check that the video is "
-            "publicly accessible and that you have permission to use it. "
-            f"Download details: {exc}"
-        ) from exc
+            "The YouTube video could not be accessed. Check that it is public "
+            "and try again later."
+        ) from None
 
     source = _cached_source(cache_dir)
     if source is None:

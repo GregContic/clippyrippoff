@@ -7,14 +7,23 @@ from unittest.mock import patch
 
 from tests import SCRIPTS_DIR  # noqa: F401
 from detect_clips import main as detect_main
-from youtube import InvalidYouTubeURLError, download_youtube_video, extract_video_id
+from youtube import (
+    BOT_CHALLENGE_MESSAGE,
+    InvalidYouTubeURLError,
+    YouTubeBotChallengeError,
+    YouTubeError,
+    download_youtube_video,
+    extract_video_id,
+)
 
 
 class FakeYoutubeDL:
     calls = 0
+    last_options = None
 
     def __init__(self, options):
         self.options = options
+        FakeYoutubeDL.last_options = options
 
     def __enter__(self):
         return self
@@ -67,6 +76,45 @@ class TestYouTubeCache(unittest.TestCase):
             self.assertEqual(second["video_id"], "abc123XYZ_1")
             self.assertEqual(second["title"], "Authorized Test Video")
             self.assertTrue(Path(second["filepath"]).exists())
+            self.assertEqual(FakeYoutubeDL.last_options["js_runtimes"], {"node": {}})
+
+    def test_bot_challenge_returns_safe_user_message_and_redacts_diagnostics(self):
+        class BotChallengeYoutubeDL(FakeYoutubeDL):
+            def extract_info(self, url, download=True):
+                self.options["logger"].error(
+                    "Extraction failed for "
+                    "https://youtube.com/watch?v=abc123XYZ_1&token=private-value"
+                )
+                raise RuntimeError(
+                    "Sign in to confirm you’re not a bot: "
+                    "https://youtube.com/watch?v=abc123XYZ_1&token=private-value"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("youtube._load_yt_dlp", return_value=type("Module", (), {"YoutubeDL": BotChallengeYoutubeDL})):
+                with self.assertLogs("youtube", level="WARNING") as logs:
+                    with self.assertRaises(YouTubeBotChallengeError) as raised:
+                        download_youtube_video(
+                            "https://youtu.be/abc123XYZ_1", output_dir=Path(directory)
+                        )
+
+        self.assertEqual(str(raised.exception), BOT_CHALLENGE_MESSAGE)
+        self.assertNotIn("private-value", "\n".join(logs.output))
+        self.assertIn("[REDACTED]", "\n".join(logs.output))
+
+    def test_other_extraction_errors_do_not_expose_raw_details(self):
+        class FailingYoutubeDL(FakeYoutubeDL):
+            def extract_info(self, url, download=True):
+                raise RuntimeError("private extraction details")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("youtube._load_yt_dlp", return_value=type("Module", (), {"YoutubeDL": FailingYoutubeDL})):
+                with self.assertRaises(YouTubeError) as raised:
+                    download_youtube_video(
+                        "https://youtu.be/abc123XYZ_1", output_dir=Path(directory)
+                    )
+
+        self.assertNotIn("private extraction details", str(raised.exception))
 
     def test_force_download_ignores_cache(self):
         with tempfile.TemporaryDirectory() as directory:

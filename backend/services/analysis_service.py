@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -16,14 +17,25 @@ from backend.services.project_service import (
     save_project_metadata,
 )
 from scripts.detect_clips import detect_candidates
-from scripts.youtube import YouTubeError, cache_paths, download_youtube_video, extract_video_id
+from scripts.youtube import (
+    BOT_CHALLENGE_MESSAGE,
+    YouTubeBotChallengeError,
+    YouTubeError,
+    cache_paths,
+    download_youtube_video,
+    extract_video_id,
+)
 from scripts.utils import FFmpegNotFoundError, TranscriptionError, load_config
 from backend.services.storage import storage
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def _friendly_error(exc: Exception) -> str:
+    if isinstance(exc, YouTubeBotChallengeError):
+        return BOT_CHALLENGE_MESSAGE
     if isinstance(exc, YouTubeError):
-        return str(exc)
+        return "YouTube could not provide this video to the server. Check that it is public and try again later."
     if isinstance(exc, (FFmpegNotFoundError, TranscriptionError, ValueError, RuntimeError)):
         return str(exc)
     return "Unable to analyze this video."
@@ -148,18 +160,26 @@ def start_analysis(url: str, *, force_download: bool = False) -> AnalyzeResponse
             summary = project_summary(video_id_local) or {}
             job_registry.update(job_id, status="completed", stage="complete", message="Complete", result=summary)
         except Exception as exc:
+            error_message = _friendly_error(exc)
+            _LOGGER.error(
+                "Analysis job %s failed for video %s (%s): %s",
+                job_id,
+                video_id,
+                type(exc).__name__,
+                error_message,
+            )
             job_registry.update(
                 job_id,
                 status="failed",
                 stage="failed",
-                message="Unable to analyze this video.",
-                error=_friendly_error(exc),
+                message=error_message,
+                error=error_message,
             )
             patch_project_metadata(
                 video_id,
                 status="failed",
                 analysis_stage="failed",
-                message=_friendly_error(exc),
+                message=error_message,
                 analysis_job_id=job_id,
             )
 
