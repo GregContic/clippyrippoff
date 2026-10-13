@@ -1,10 +1,14 @@
 import type {
   AnalyzeResponse,
+  BatchResponse,
   CaptionPreset,
   CandidateEditorState,
   CandidateListResponse,
+  CompilationResponse,
+  EditingSettings,
   LibraryResponse,
   ProjectFilesResponse,
+  ProjectMusicAsset,
   ProjectEditorState,
   ProjectSummary,
   RenderJob,
@@ -84,14 +88,16 @@ export function analyzeVideo(url: string, forceDownload = false): Promise<Analyz
 export function uploadVideo(file: File): Promise<AnalyzeResponse> {
   const form = new FormData();
   form.append('file', file);
+  const csrfToken = document.cookie.split('; ').find((item) => item.startsWith('clippy_csrf='))?.split('=').slice(1).join('=');
+  const headers: Record<string, string> = {};
+  if (csrfToken) {
+    headers['X-CSRF-Token'] = decodeURIComponent(csrfToken);
+  }
   return fetch(`${API_BASE_URL}/api/videos/upload`, {
     method: 'POST',
     body: form,
     credentials: 'include',
-    headers: (() => {
-      const csrfToken = document.cookie.split('; ').find((item) => item.startsWith('clippy_csrf='))?.split('=').slice(1).join('=');
-      return csrfToken ? { 'X-CSRF-Token': decodeURIComponent(csrfToken) } : {};
-    })(),
+    headers,
   }).then(async (response) => {
     const text = await response.text();
     if (!response.ok) {
@@ -150,10 +156,10 @@ export function saveEditorState(videoId: string, state: ProjectEditorState): Pro
   });
 }
 
-export function renderCandidates(videoId: string, candidateIds: number[]): Promise<RenderResponse> {
+export function renderCandidates(videoId: string, candidateIds: number[], editing?: EditingSettings): Promise<RenderResponse> {
   return requestJson<RenderResponse>(`/api/videos/${encodeURIComponent(videoId)}/render`, {
     method: 'POST',
-    body: JSON.stringify({ candidate_ids: candidateIds }),
+    body: JSON.stringify({ candidate_ids: candidateIds, ...(editing ? { editing } : {}) }),
   });
 }
 
@@ -162,10 +168,11 @@ export function renderCandidateOverride(
   candidateIds: number[],
   overrides: Record<string, TrimOverride>,
   candidateStates?: Record<string, CandidateEditorState>,
+  editing?: EditingSettings,
 ): Promise<RenderResponse> {
   return requestJson<RenderResponse>(`/api/videos/${encodeURIComponent(videoId)}/render`, {
     method: 'POST',
-    body: JSON.stringify({ candidate_ids: candidateIds, overrides, candidate_states: candidateStates ?? {} }),
+    body: JSON.stringify({ candidate_ids: candidateIds, overrides, candidate_states: candidateStates ?? {}, ...(editing ? { editing } : {}) }),
   });
 }
 
@@ -222,6 +229,84 @@ export function listLibrary(): Promise<LibraryResponse> {
 export function deleteLibraryFile(filename: string): Promise<void> {
   return requestJson<void>(`/api/library/${encodeURIComponent(filename)}`, {
     method: 'DELETE',
+  });
+}
+
+export function deleteLibraryArtifact(artifactId: string): Promise<void> {
+  return requestJson<void>(`/api/library/artifacts/${encodeURIComponent(artifactId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function createBatch(
+  videoId: string,
+  request: {
+    target_duration_seconds: number;
+    minimum_spacing_seconds: number;
+    max_clips?: number;
+    candidate_ids?: number[];
+    render_settings?: Record<string, unknown>;
+    editing?: EditingSettings;
+  },
+): Promise<BatchResponse> {
+  return requestJson<BatchResponse>(`/api/projects/${encodeURIComponent(videoId)}/batches`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export function getBatch(batchId: string): Promise<BatchResponse> {
+  return requestJson<BatchResponse>(`/api/batches/${encodeURIComponent(batchId)}`);
+}
+
+export function createCompilation(
+  videoId: string,
+  request: {
+    segments: Array<{ candidate_id: number; start: number; end: number }>;
+    max_total_duration_seconds: number;
+    render_settings: { captions_enabled: boolean };
+    editing?: EditingSettings;
+  },
+): Promise<CompilationResponse> {
+  return requestJson<CompilationResponse>(`/api/projects/${encodeURIComponent(videoId)}/compilations`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export function getCompilation(compilationId: string): Promise<CompilationResponse> {
+  return requestJson<CompilationResponse>(`/api/compilations/${encodeURIComponent(compilationId)}`);
+}
+
+export function getProjectMusic(videoId: string): Promise<ProjectMusicAsset[]> {
+  return requestJson<ProjectMusicAsset[]>(`/api/projects/${encodeURIComponent(videoId)}/music`);
+}
+
+export function uploadProjectMusic(videoId: string, file: File): Promise<ProjectMusicAsset> {
+  const form = new FormData();
+  form.append('file', file);
+  const csrfToken = document.cookie.split('; ').find((item) => item.startsWith('clippy_csrf='))?.split('=').slice(1).join('=');
+  const headers: Record<string, string> = {};
+  if (csrfToken) {
+    headers['X-CSRF-Token'] = decodeURIComponent(csrfToken);
+  }
+  return fetch(`${API_BASE_URL}/api/projects/${encodeURIComponent(videoId)}/music`, {
+    method: 'POST',
+    body: form,
+    credentials: 'include',
+    headers,
+  }).then(async (response) => {
+    const text = await response.text();
+    if (!response.ok) {
+      let message = text;
+      try {
+        message = (JSON.parse(text) as { detail?: string }).detail ?? message;
+      } catch {
+        // Surface non-JSON server errors as-is.
+      }
+      throw new Error(message || `Request failed with status ${response.status}`);
+    }
+    return JSON.parse(text) as ProjectMusicAsset;
   });
 }
 

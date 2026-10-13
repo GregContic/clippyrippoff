@@ -272,6 +272,59 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         raise RuntimeError(f"Could not write subtitle file to {ass_path}: {exc}") from exc
 
 
+def write_hook_ass(
+    *,
+    text: str,
+    start: float,
+    end: float,
+    position: str,
+    font_size: int,
+    color: str,
+    outline_width: int,
+    background_box: bool,
+    background_color: str,
+    config: dict,
+    ass_path: Path,
+) -> None:
+    """Write safe, output-relative hook text using the existing ASS/libass path."""
+    width = int(config["output_width"])
+    height = int(config["output_height"])
+    alignment, margin_v = {
+        "top": (8, round(height * 0.12)),
+        "center": (5, 0),
+        "bottom": (2, round(height * 0.18)),
+    }[position]
+
+    def ass_color(value: str, alpha: int = 0) -> str:
+        red, green, blue = value[1:3], value[3:5], value[5:7]
+        return f"&H{alpha:02X}{blue}{green}{red}"
+
+    back_color = ass_color(background_color, 0x70 if background_box else 0x80)
+    border_style = 3 if background_box else 1
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Hook,{config.get("caption_font_name", "Arial Black")},{font_size},{ass_color(color)},{ass_color(color)},{config.get("caption_outline_color", "&H00000000")},{back_color},{-1 if config.get("caption_bold", True) else 0},0,0,0,100,100,0,0,{border_style},{outline_width},0,{alignment},{SAFE_MARGIN_PX},{SAFE_MARGIN_PX},{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    normalized_text = text.replace("\r\n", "\n").replace("\r", "\n")
+    ass_text = r"\N".join(_escape_ass_text(line) for line in normalized_text.split("\n"))
+    event = f"Dialogue: 0,{_format_ass_time(start)},{_format_ass_time(end)},Hook,,0,0,0,,{ass_text}\n"
+    try:
+        ass_path.parent.mkdir(parents=True, exist_ok=True)
+        ass_path.write_text(header + event, encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Could not write hook subtitle file to {ass_path}: {exc}") from exc
+
+
 # --------------------------------------------------------------------------
 # Rendering
 # --------------------------------------------------------------------------
@@ -324,7 +377,13 @@ def render_short(
         run_subprocess(args, "Short rendering")
 
 
-def verify_output(output_path: Path, config: dict, expected_duration: float) -> list[str]:
+def verify_output(
+    output_path: Path,
+    config: dict,
+    expected_duration: float,
+    *,
+    require_audio: bool = True,
+) -> list[str]:
     """Verify the rendered Short. Returns a list of problems (empty = OK)."""
     problems: list[str] = []
     if not output_path.exists():
@@ -340,7 +399,7 @@ def verify_output(output_path: Path, config: dict, expected_duration: float) -> 
 
     if not info["has_video"]:
         problems.append("Output file has no video stream.")
-    if not info["has_audio"]:
+    if require_audio and not info["has_audio"]:
         problems.append("Output file has no audio stream.")
     if info["width"] != config["output_width"] or info["height"] != config["output_height"]:
         problems.append(

@@ -87,6 +87,78 @@ class RenderSettings(BaseModel):
         return self
 
 
+class HookOverlaySettings(BaseModel):
+    text: str = Field(min_length=1, max_length=120)
+    start_seconds: float = Field(default=0.0, ge=0, le=600)
+    duration_seconds: float = Field(default=2.5, gt=0, le=30)
+    position: Literal["top", "center", "bottom"] = "center"
+    font_size: int = Field(default=64, ge=16, le=160)
+    color: str = "#FFFFFF"
+    outline_width: int = Field(default=3, ge=0, le=12)
+    background_box: bool = False
+    background_color: str = "#000000"
+
+    @model_validator(mode="after")
+    def _validate_colors(self) -> "HookOverlaySettings":
+        for name in ("color", "background_color"):
+            if not re.fullmatch(r"#[0-9A-Fa-f]{6}", getattr(self, name)):
+                raise ValueError(f"Hook {name.replace('_', ' ')} must be a 6-digit hex color.")
+        if any(ord(character) < 32 and character not in "\n\t" for character in self.text):
+            raise ValueError("Hook text contains unsupported control characters.")
+        return self
+
+
+class ZoomInterval(BaseModel):
+    start_seconds: float = Field(ge=0, le=600)
+    end_seconds: float = Field(gt=0, le=600)
+    scale: float = Field(default=1.15, ge=1.05, le=1.35)
+
+    @model_validator(mode="after")
+    def _validate_interval(self) -> "ZoomInterval":
+        if not math.isfinite(self.start_seconds) or not math.isfinite(self.end_seconds):
+            raise ValueError("Zoom interval times must be finite.")
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("Zoom interval end must be after its start.")
+        return self
+
+
+class BackgroundMusicSettings(BaseModel):
+    asset_id: str = Field(min_length=1, max_length=100, pattern=r"^music-[A-Fa-f0-9]{32}$")
+    volume: float = Field(default=0.2, ge=0, le=1)
+    loop: bool = True
+    fade_in_seconds: float = Field(default=0.0, ge=0, le=10)
+    fade_out_seconds: float = Field(default=0.0, ge=0, le=10)
+    duck_original_audio: bool = False
+
+    @model_validator(mode="after")
+    def _validate_volumes(self) -> "BackgroundMusicSettings":
+        if not math.isfinite(self.volume) or not math.isfinite(self.fade_in_seconds) or not math.isfinite(self.fade_out_seconds):
+            raise ValueError("Music volume and fades must be finite.")
+        return self
+
+
+class EditingSettings(BaseModel):
+    """Versioned optional effects. Hook/zoom times are relative to the rendered output."""
+
+    schema_version: Literal[1] = 1
+    hook: HookOverlaySettings | None = None
+    zoom_intervals: list[ZoomInterval] = Field(default_factory=list, max_length=12)
+    music: BackgroundMusicSettings | None = None
+    caption_preset_id: str | None = Field(default=None, min_length=1, max_length=100)
+    transition: Literal["hard_cut", "crossfade"] = "hard_cut"
+    transition_duration_seconds: float = Field(default=0.5, gt=0, le=2)
+
+    @model_validator(mode="after")
+    def _validate_zoom_order(self) -> "EditingSettings":
+        ordered = sorted(self.zoom_intervals, key=lambda item: item.start_seconds)
+        for previous, current in zip(ordered, ordered[1:]):
+            if current.start_seconds < previous.end_seconds:
+                raise ValueError("Zoom intervals must not overlap.")
+        if self.transition == "hard_cut" and self.transition_duration_seconds > 2:
+            raise ValueError("Transition duration must not exceed 2 seconds.")
+        return self
+
+
 class CandidateEditorState(BaseModel):
     trim: TrimBounds | None = None
     caption_segments: list[CaptionSegmentEdit] = Field(default_factory=list)
@@ -120,6 +192,7 @@ class RenderRequest(BaseModel):
     candidate_ids: list[int] = Field(default_factory=list)
     overrides: dict[str, TrimBounds] = Field(default_factory=dict)
     candidate_states: dict[str, CandidateEditorState] = Field(default_factory=dict)
+    editing: EditingSettings | None = None
 
 
 class ReviewRequest(BaseModel):
@@ -145,6 +218,115 @@ class RenderResponse(BaseModel):
     render_job_ids: list[str]
 
 
+class BatchRequest(BaseModel):
+    target_duration_seconds: float = Field(default=30.0, gt=0, le=600)
+    minimum_spacing_seconds: float = Field(default=5.0, ge=0, le=600)
+    max_clips: int | None = Field(default=None, ge=1, le=50)
+    candidate_ids: list[int] | None = None
+    render_settings: RenderSettings | None = None
+    editing: EditingSettings | None = None
+
+    @model_validator(mode="after")
+    def _validate_numbers(self) -> "BatchRequest":
+        if not math.isfinite(self.target_duration_seconds) or not math.isfinite(self.minimum_spacing_seconds):
+            raise ValueError("Batch duration and spacing must be finite numbers.")
+        return self
+
+
+class BatchChildResponse(BaseModel):
+    job_id: str
+    status: str
+    percent: float = 0.0
+    candidate_id: int | None = None
+    start: float | None = None
+    end: float | None = None
+    artifact_id: str | None = None
+    output_url: str | None = None
+    error: str | None = None
+
+
+class BatchResponse(BaseModel):
+    batch_id: str
+    project_id: str
+    parent_job_id: str
+    status: str
+    percent: float = 0.0
+    child_job_ids: list[str]
+    children: list[BatchChildResponse] = Field(default_factory=list)
+    target_duration_seconds: float
+    minimum_spacing_seconds: float
+    created_at: str
+    updated_at: str | None = None
+    completed_at: str | None = None
+
+
+class CompilationSegmentRequest(BaseModel):
+    candidate_id: int = Field(gt=0, strict=True)
+    start: float | None = None
+    end: float | None = None
+
+    @model_validator(mode="after")
+    def _validate_trim(self) -> "CompilationSegmentRequest":
+        if self.start is not None and not math.isfinite(self.start):
+            raise ValueError("Segment start must be a finite number.")
+        if self.end is not None and not math.isfinite(self.end):
+            raise ValueError("Segment end must be a finite number.")
+        if self.start is not None and self.end is not None and self.end <= self.start:
+            raise ValueError("Segment end must be after segment start.")
+        return self
+
+
+class CompilationRequest(BaseModel):
+    """Segments are rendered in submitted array order; no automatic reordering occurs."""
+
+    segments: list[CompilationSegmentRequest] = Field(min_length=1, max_length=50)
+    max_total_duration_seconds: float = Field(gt=0, le=600)
+    render_settings: RenderSettings | None = None
+    editing: EditingSettings | None = None
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "CompilationRequest":
+        if not math.isfinite(self.max_total_duration_seconds):
+            raise ValueError("Maximum preferred duration must be a finite number.")
+        candidate_ids = [segment.candidate_id for segment in self.segments]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("Duplicate candidate selections are not supported.")
+        return self
+
+
+class CompilationSegmentResponse(BaseModel):
+    candidate_id: int
+    start: float
+    end: float
+    duration: float
+
+
+class CompilationResponse(BaseModel):
+    compilation_id: str
+    project_id: str
+    parent_job_id: str
+    status: str
+    progress: float = 0.0
+    segments: list[CompilationSegmentResponse]
+    effective_duration_seconds: float
+    output_artifact_id: str | None = None
+    output_url: str | None = None
+    message: str | None = None
+    failure: str | None = None
+    created_at: str
+    updated_at: str | None = None
+    completed_at: str | None = None
+
+
+class MusicAssetResponse(BaseModel):
+    asset_id: str
+    project_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    duration_seconds: float
+
+
 class JobResponse(BaseModel):
     id: str
     kind: str
@@ -163,6 +345,8 @@ class JobResponse(BaseModel):
     updated_at: str
     review_status: str = "pending_review"
     review_notes: str = ""
+    artifact_id: str | None = None
+    artifact_kind: str | None = None
 
 
 class CandidateResponse(BaseModel):
@@ -244,6 +428,9 @@ class ProjectFileItem(BaseModel):
     duration: float | None = None
     candidate_id: int | None = None
     render_job_id: str | None = None
+    artifact_id: str | None = None
+    project_id: str | None = None
+    kind: str = "clip"
 
 
 class ProjectFilesResponse(BaseModel):
@@ -254,6 +441,9 @@ class LibraryItem(BaseModel):
     filename: str
     url: str
     size_bytes: int
+    artifact_id: str | None = None
+    project_id: str | None = None
+    kind: str = "clip"
     created_at: str | None = None
     duration: float | None = None
     review_status: str = "pending_review"

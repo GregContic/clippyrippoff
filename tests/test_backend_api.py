@@ -10,10 +10,14 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 import backend.services.analysis_service as analysis_service
+import backend.services.compilation_service as compilation_service
 import backend.services.project_service as project_service
 import backend.services.render_service as render_service
+import backend.api.media as media_api
+import backend.services.batch_service as batch_service
 from backend.services.job_registry import job_registry
 from backend.services.auth import auth_repository
+from backend.services.storage import S3Storage, StorageError
 from scripts.youtube import BOT_CHALLENGE_MESSAGE, YouTubeBotChallengeError
 
 
@@ -34,7 +38,10 @@ class TestBackendApi(unittest.TestCase):
             patch.object(project_service, "OUTPUT_SHORTS_DIR", self.output_root),
             patch.object(project_service, "PROCESSING_TEMP_DIR", self.root / "processing" / "temp"),
             patch.object(render_service, "OUTPUT_SHORTS_DIR", self.output_root),
+            patch.object(media_api, "OUTPUT_SHORTS_DIR", self.output_root),
             patch.object(render_service, "PROCESSING_TEMP_DIR", self.root / "processing" / "temp"),
+            patch.object(compilation_service, "OUTPUT_SHORTS_DIR", self.output_root),
+            patch.object(compilation_service, "PROCESSING_TEMP_DIR", self.root / "processing" / "temp"),
             patch.object(job_registry, "storage_dir", self.root / "processing" / "temp" / "render_jobs"),
             patch.object(project_service, "get_media_info", return_value={"duration": 60.5}),
             patch.object(render_service, "get_media_info", return_value={"duration": 60.5}),
@@ -494,8 +501,11 @@ class TestBackendApi(unittest.TestCase):
         self.assertEqual(candidate["trim_end"], 26.0)
 
     def test_library_listing_and_safe_deletion(self) -> None:
+        self._create_project("legacy-video")
         short_path = self.output_root / "short_2026-09-27_001.mp4"
         short_path.write_bytes(b"video")
+        job = job_registry.create("render", video_id="legacy-video")
+        job_registry.update(job.id, status="completed", output_path=str(short_path))
 
         response = self.client.get("/api/library")
         self.assertEqual(response.status_code, 200)
@@ -507,6 +517,406 @@ class TestBackendApi(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             project_service.safe_output_path("..\\evil.mp4")
+
+    def test_library_preserves_projects_and_lists_durable_renders(self) -> None:
+        class FakeR2(S3Storage):
+            def list_keys(self, prefix: str):
+                return iter(
+                    [
+                        "projects/video-b/renders/short-b.mp4",
+                        "projects/video-b/candidates.json",
+                    ]
+                )
+
+            def object_size(self, key: str) -> int | None:
+                return 456
+
+        self._create_project("video-a", owner_id=self.owner_id)
+        self._create_project("video-b", owner_id=self.owner_id)
+        local_a = self.output_root / "short-a.mp4"
+        local_a.write_bytes(b"video-a")
+        local_job = job_registry.create("render", video_id="video-a")
+        job_registry.update(local_job.id, status="completed", output_path=str(local_a))
+
+        fake_storage = object.__new__(FakeR2)
+        with patch.object(project_service, "storage", fake_storage):
+            first = self.client.get("/api/library")
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual({item["filename"] for item in first.json()["items"]}, {"short-a.mp4", "short-b.mp4"})
+            self.assertIn("/api/media/renders/video-b/short-b.mp4", {item["url"] for item in first.json()["items"]})
+
+            second = self.client.get("/api/library")
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(
+                [item["filename"] for item in second.json()["items"]],
+                [item["filename"] for item in first.json()["items"]],
+            )
+
+        other_client = self._authenticated_client("library-other@example.com", "other-password-123")
+        other_response = other_client.get("/api/library")
+        self.assertEqual(other_response.status_code, 200)
+        self.assertEqual(other_response.json()["items"], [])
+
+    def test_library_storage_failure_is_not_reported_as_empty(self) -> None:
+        class FailingR2(S3Storage):
+            def list_keys(self, prefix: str):
+                raise StorageError("R2 listing failed")
+
+        fake_storage = object.__new__(FailingR2)
+        with patch.object(project_service, "storage", fake_storage):
+            response = self.client.get("/api/library")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {"detail": "Library storage is temporarily unavailable."})
+
+    def test_artifact_media_and_deletion_are_owner_scoped(self) -> None:
+        project_dir = self._create_project("artifact-video")
+        output = self.output_root / "short-artifact.mp4"
+        output.write_bytes(b"artifact")
+        metadata_path = project_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["artifacts"] = [{
+            "artifact_id": "artifact-owner-only",
+            "project_id": "artifact-video",
+            "owner_id": self.owner_id,
+            "kind": "clip",
+            "filename": output.name,
+            "status": "completed",
+        }]
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        other_client = self._authenticated_client("artifact-other@example.com", "other-password-123")
+        self.assertEqual(other_client.get("/api/media/artifacts/artifact-owner-only").status_code, 404)
+        self.assertEqual(other_client.delete("/api/library/artifacts/artifact-owner-only").status_code, 404)
+        self.assertEqual(self.client.get("/api/media/artifacts/artifact-owner-only").status_code, 200)
+        self.assertEqual(self.client.delete("/api/library/artifacts/artifact-owner-only").status_code, 200)
+        self.assertFalse(output.exists())
+
+    def test_batch_creation_and_status_are_owner_scoped(self) -> None:
+        self._create_project("batch-video")
+        child = job_registry.create("render", video_id="batch-video", candidate_id=1, artifact_id="batch-artifact")
+        job_registry.update(child.id, status="completed", percent=100.0, output_url="/api/media/artifacts/batch-artifact")
+        with patch.object(batch_service, "submit_renders", return_value=[child.id]):
+            response = self.client.post(
+                "/api/projects/batch-video/batches",
+                json={"target_duration_seconds": 30, "minimum_spacing_seconds": 5, "max_clips": 1},
+            )
+        self.assertEqual(response.status_code, 200)
+        batch = response.json()
+        self.assertEqual(batch["status"], "completed")
+        self.assertEqual(batch["children"][0]["artifact_id"], "batch-artifact")
+        self.assertEqual(project_service.load_project_metadata("batch-video")["batches"][0]["batch_id"], batch["batch_id"])
+        other_client = self._authenticated_client("batch-other@example.com", "other-password-123")
+        self.assertEqual(other_client.get(f"/api/batches/{batch['batch_id']}").status_code, 404)
+
+    def test_smart_editing_rejects_compilation_only_transition_before_job_creation(self) -> None:
+        self._create_project("effects-video")
+        response = self.client.post(
+            "/api/videos/effects-video/render",
+            json={
+                "candidate_ids": [1],
+                "editing": {"schema_version": 1, "transition": "crossfade"},
+            },
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("only supported for Auto-Compilation", response.json()["detail"])
+        self.assertFalse(any(job.kind == "render" for job in job_registry.list()))
+
+    def test_project_music_endpoints_reject_cross_user_access_and_bad_formats(self) -> None:
+        self._create_project("music-project")
+        other_client = self._authenticated_client("music-other@example.com", "other-password-123")
+        self.assertEqual(other_client.get("/api/projects/music-project/music").status_code, 404)
+        denied = other_client.post(
+            "/api/projects/music-project/music",
+            files={"file": ("track.mp3", b"audio", "audio/mpeg")},
+        )
+        self.assertEqual(denied.status_code, 404)
+        invalid = self.client.post(
+            "/api/projects/music-project/music",
+            files={"file": ("track.exe", b"not audio", "application/octet-stream")},
+        )
+        self.assertEqual(invalid.status_code, 422)
+
+    def _wait_for_compilation(self, compilation_id: str, client: TestClient | None = None) -> dict:
+        selected_client = client or self.client
+        for _ in range(200):
+            response = selected_client.get(f"/api/compilations/{compilation_id}")
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            if payload["status"] in {"completed", "failed", "interrupted"}:
+                cleanup_dir = self.root / "processing" / "temp" / "compilations" / compilation_id
+                for _ in range(100):
+                    if not cleanup_dir.exists():
+                        break
+                    time.sleep(0.01)
+                self.assertFalse(cleanup_dir.exists(), "Compilation temporary files were not cleaned.")
+                return payload
+            time.sleep(0.01)
+        self.fail("Compilation did not reach a terminal status.")
+
+    def _compilation_test_patches(self, fake_storage):
+        def render_segment(_source, _start, _end, _config, _ass, output, progress_callback=None):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"normalized segment")
+
+        def concatenate(command, _description):
+            Path(command[-1]).write_bytes(b"compiled output")
+
+        return [
+            patch.object(
+                compilation_service,
+                "get_media_info",
+                return_value={"duration": 60.5, "has_audio": True},
+            ),
+            patch.object(
+                compilation_service,
+                "load_config",
+                return_value={
+                    "clip_min_seconds": 10,
+                    "clip_max_seconds": 60,
+                    "output_width": 1080,
+                    "output_height": 1920,
+                    "fps": 30,
+                    "captions_enabled": True,
+                },
+            ),
+            patch.object(compilation_service, "_caption_source", return_value=[]),
+            patch.object(compilation_service, "render_short", side_effect=render_segment),
+            patch.object(compilation_service, "run_subprocess", side_effect=concatenate),
+            patch.object(compilation_service, "verify_compilation_output"),
+            patch.object(compilation_service, "storage", fake_storage),
+        ]
+
+    def test_compilation_creation_preserves_order_and_persists_unique_artifacts(self) -> None:
+        class FakeStorage:
+            def __init__(self):
+                self.uploaded = []
+
+            def exists(self, _key):
+                return False
+
+            def upload_file(self, source, key, content_type=None):
+                self.uploaded.append((key, content_type, source.read_bytes()))
+
+        project_dir = self._create_project("compile-project")
+        source = project_dir / "source.mp4"
+        source.write_bytes(b"source")
+        candidates_path = project_dir / "candidates.json"
+        candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+        second = dict(candidates["candidates"][0])
+        second.update({"id": 2, "start": 30.0, "end": 42.0})
+        candidates["candidates"].append(second)
+        candidates_path.write_text(json.dumps(candidates), encoding="utf-8")
+        fake_storage = FakeStorage()
+        patchers = self._compilation_test_patches(fake_storage)
+        for patcher in patchers:
+            patcher.start()
+        try:
+            created = []
+            for _ in range(2):
+                response = self.client.post(
+                    "/api/projects/compile-project/compilations",
+                    json={
+                        "segments": [{"candidate_id": 2}, {"candidate_id": 1}],
+                        "max_total_duration_seconds": 30,
+                        "render_settings": {"captions_enabled": False},
+                    },
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertEqual([segment["candidate_id"] for segment in body["segments"]], [2, 1])
+                completed = self._wait_for_compilation(body["compilation_id"])
+                self.assertEqual(completed["status"], "completed", completed)
+                self.assertEqual(completed["progress"], 100.0)
+                self.assertTrue(completed["output_url"].endswith(completed["output_artifact_id"]))
+                created.append(completed)
+
+            with patch.object(job_registry, "get", return_value=None):
+                restored = compilation_service.get_compilation(
+                    created[0]["compilation_id"],
+                    owner_id=self.owner_id,
+                )
+            self.assertEqual(restored["status"], "completed")
+            self.assertEqual(restored["output_artifact_id"], created[0]["output_artifact_id"])
+            self.assertNotEqual(created[0]["compilation_id"], created[1]["compilation_id"])
+            self.assertNotEqual(created[0]["output_artifact_id"], created[1]["output_artifact_id"])
+            self.assertNotEqual(fake_storage.uploaded[0][0], fake_storage.uploaded[1][0])
+            self.assertTrue(all(key.startswith("projects/compile-project/renders/") for key, _, _ in fake_storage.uploaded))
+            metadata = project_service.load_project_metadata("compile-project")
+            compilation_artifacts = [item for item in metadata["artifacts"] if item["kind"] == "compilation"]
+            self.assertEqual(len(compilation_artifacts), 2)
+            self.assertTrue(all(item["status"] == "completed" for item in compilation_artifacts))
+            library = self.client.get("/api/library")
+            self.assertEqual(library.status_code, 200)
+            self.assertEqual(
+                {item["artifact_id"] for item in library.json()["items"] if item["kind"] == "compilation"},
+                {item["output_artifact_id"] for item in created},
+            )
+            self.assertFalse((self.root / "processing" / "temp" / "compilations" / created[0]["compilation_id"]).exists())
+        finally:
+            for patcher in reversed(patchers):
+                patcher.stop()
+
+    def test_compilation_running_status_reports_job_progress(self) -> None:
+        from threading import Event
+
+        entered_render = Event()
+        continue_render = Event()
+
+        class FakeStorage:
+            def exists(self, _key):
+                return False
+
+            def upload_file(self, _source, _key, content_type=None):
+                return None
+
+        project_dir = self._create_project("compile-progress")
+        (project_dir / "source.mp4").write_bytes(b"source")
+        patchers = self._compilation_test_patches(FakeStorage())
+
+        def blocking_render(_source, _start, _end, _config, _ass, output, progress_callback=None):
+            if progress_callback:
+                progress_callback({"out_time_us": "5000000"})
+            entered_render.set()
+            if not continue_render.wait(timeout=5):
+                raise RuntimeError("Test render gate timed out.")
+            output.write_bytes(b"normalized segment")
+
+        patchers[3] = patch.object(compilation_service, "render_short", side_effect=blocking_render)
+        for patcher in patchers:
+            patcher.start()
+        response = None
+        compilation_id = None
+        try:
+            response = self.client.post(
+                "/api/projects/compile-progress/compilations",
+                json={
+                    "segments": [{"candidate_id": 1}],
+                    "max_total_duration_seconds": 30,
+                    "render_settings": {"captions_enabled": False},
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            compilation_id = response.json()["compilation_id"]
+            self.assertTrue(entered_render.wait(timeout=3))
+            running = self.client.get(f"/api/compilations/{compilation_id}").json()
+            self.assertEqual(running["status"], "running")
+            self.assertGreater(running["progress"], 0.0)
+            self.assertLessEqual(running["progress"], 85.0)
+        finally:
+            continue_render.set()
+            if response is not None and response.status_code == 200 and compilation_id is not None:
+                self._wait_for_compilation(compilation_id)
+            for patcher in reversed(patchers):
+                patcher.stop()
+
+    def test_ffmpeg_concat_failure_fails_job_and_cleans_segment_files(self) -> None:
+        class FakeStorage:
+            def __init__(self):
+                self.uploaded = []
+
+            def exists(self, _key):
+                return False
+
+            def upload_file(self, source, key, content_type=None):
+                self.uploaded.append(key)
+
+        project_dir = self._create_project("compile-ffmpeg-fail")
+        (project_dir / "source.mp4").write_bytes(b"source")
+        fake_storage = FakeStorage()
+        patchers = self._compilation_test_patches(fake_storage)
+        patchers[4] = patch.object(
+            compilation_service,
+            "run_subprocess",
+            side_effect=RuntimeError("FFmpeg concat failed"),
+        )
+        for patcher in patchers:
+            patcher.start()
+        try:
+            response = self.client.post(
+                "/api/projects/compile-ffmpeg-fail/compilations",
+                json={
+                    "segments": [{"candidate_id": 1}],
+                    "max_total_duration_seconds": 30,
+                    "render_settings": {"captions_enabled": False},
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            failed = self._wait_for_compilation(response.json()["compilation_id"])
+            self.assertEqual(failed["status"], "failed")
+            self.assertIn("FFmpeg concat failed", failed["failure"])
+            self.assertEqual(fake_storage.uploaded, [])
+            self.assertFalse(
+                (self.root / "processing" / "temp" / "compilations" / failed["compilation_id"]).exists()
+            )
+        finally:
+            for patcher in reversed(patchers):
+                patcher.stop()
+
+    def test_compilation_upload_failure_is_failed_and_cleans_temporary_output(self) -> None:
+        class FailingStorage:
+            def exists(self, _key):
+                return False
+
+            def upload_file(self, _source, _key, content_type=None):
+                raise StorageError("upload failed")
+
+        project_dir = self._create_project("compile-upload-fail")
+        (project_dir / "source.mp4").write_bytes(b"source")
+        patchers = self._compilation_test_patches(FailingStorage())
+        for patcher in patchers:
+            patcher.start()
+        try:
+            response = self.client.post(
+                "/api/projects/compile-upload-fail/compilations",
+                json={
+                    "segments": [{"candidate_id": 1}],
+                    "max_total_duration_seconds": 30,
+                    "render_settings": {"captions_enabled": False},
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            failed = self._wait_for_compilation(response.json()["compilation_id"])
+            self.assertEqual(failed["status"], "failed")
+            self.assertIn("upload failed", failed["failure"])
+            self.assertIsNone(failed["output_artifact_id"])
+            failed_job = job_registry.get(failed["parent_job_id"])
+            output = self.output_root / f"compilation_{failed_job.artifact_id}.mp4"
+            self.assertFalse(output.exists())
+            metadata = project_service.load_project_metadata("compile-upload-fail")
+            self.assertFalse(any(item.get("kind") == "compilation" for item in metadata.get("artifacts", [])))
+        finally:
+            for patcher in reversed(patchers):
+                patcher.stop()
+
+    def test_compilation_status_and_creation_are_owner_scoped(self) -> None:
+        other_client = self._authenticated_client("compilation-other@example.com", "other-password-123")
+        other_id = other_client.get("/api/auth/me").json()["user"]["id"]
+        self._create_project("compilation-owner", owner_id=self.owner_id)
+        self._create_project("compilation-other", owner_id=other_id)
+        parent = job_registry.create("compilation", video_id="compilation-owner")
+        project_service.save_compilation_record(
+            "compilation-owner",
+            {
+                "compilation_id": "compilation-private-id",
+                "project_id": "compilation-owner",
+                "owner_id": self.owner_id,
+                "parent_job_id": parent.id,
+                "status": "queued",
+                "progress": 0.0,
+                "segments": [{"candidate_id": 1, "start": 12.0, "end": 24.0, "duration": 12.0}],
+                "effective_duration_seconds": 12.0,
+                "created_at": parent.created_at,
+            },
+        )
+        self.assertEqual(self.client.get("/api/compilations/compilation-private-id").status_code, 200)
+        self.assertEqual(other_client.get("/api/compilations/compilation-private-id").status_code, 404)
+        self.assertEqual(
+            other_client.post(
+                "/api/projects/compilation-owner/compilations",
+                json={"segments": [{"candidate_id": 1}], "max_total_duration_seconds": 30},
+            ).status_code,
+            404,
+        )
 
     def test_render_queue_missing_job_returns_404(self) -> None:
         response = self.client.get("/api/renders/does-not-exist")
@@ -605,6 +1015,42 @@ class TestBackendApi(unittest.TestCase):
         self.assertIsNotNone(interrupted)
         self.assertEqual(interrupted.status, "interrupted")
         self.assertEqual(interrupted.stage, "interrupted")
+
+    def test_remote_active_compilation_is_marked_interrupted_after_restart(self) -> None:
+        job_id = "33333333-3333-3333-3333-333333333333"
+        payload = {
+            "id": job_id,
+            "kind": "compilation",
+            "video_id": "abc123XYZ_1",
+            "status": "running",
+            "stage": "rendering",
+            "percent": 42.0,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:01:00+00:00",
+        }
+
+        class FakeR2(S3Storage):
+            def __init__(self):
+                self.objects = {f"jobs/{job_id}.json": json.dumps(payload).encode("utf-8")}
+
+            def list_keys(self, prefix):
+                return [key for key in self.objects if key.startswith(prefix)]
+
+            def get_bytes(self, key):
+                return self.objects[key]
+
+            def put_bytes(self, key, data, content_type=None):
+                self.objects[key] = data
+
+        job_registry.reset()
+        fake_storage = FakeR2()
+        with patch("backend.services.job_registry.storage", fake_storage):
+            job_registry.restore_from_disk()
+        restored = job_registry.get(job_id)
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.status, "interrupted")
+        self.assertEqual(restored.stage, "interrupted")
+        self.assertEqual(restored.message, "Interrupted by backend restart.")
 
     def test_retry_preserves_snapshot_and_links_prior_job(self) -> None:
         self._create_project()

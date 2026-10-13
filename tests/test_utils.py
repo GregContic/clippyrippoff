@@ -41,8 +41,18 @@ class TestParseTimestamp(unittest.TestCase):
 
 
 class TestValidateClipRange(unittest.TestCase):
-    def test_valid_range(self):
+    def test_exact_minimum_range_is_valid(self):
         validate_clip_range(10, 30, min_seconds=10, max_seconds=60)  # should not raise
+
+    def test_floating_point_rounding_at_minimum_is_valid(self):
+        validate_clip_range(0.1, 10.1, min_seconds=10, max_seconds=60)
+
+    def test_slightly_below_minimum_is_rejected(self):
+        with self.assertRaisesRegex(ValidationError, "shorter than the configured minimum"):
+            validate_clip_range(0, 9.999, min_seconds=10, max_seconds=60)
+
+    def test_safely_above_minimum_is_valid(self):
+        validate_clip_range(0, 10.1, min_seconds=10, max_seconds=60)
 
     def test_negative_start(self):
         with self.assertRaises(ValidationError):

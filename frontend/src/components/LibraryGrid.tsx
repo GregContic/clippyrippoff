@@ -9,7 +9,7 @@ export function LibraryGrid({
   reviewFilter = 'all',
 }: {
   items: LibraryItem[];
-  onDelete: (filename: string) => void;
+  onDelete: (item: LibraryItem) => void;
   reviewFilter?: string;
 }) {
   const visibleItems = reviewFilter === 'all' ? items : items.filter((item) => item.review_status === reviewFilter);
@@ -20,7 +20,7 @@ export function LibraryGrid({
   return (
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       {visibleItems.map((item) => (
-        <Card key={item.filename} className="overflow-hidden">
+        <Card key={item.artifact_id ?? `${item.project_id ?? 'legacy'}:${item.filename}`} className="overflow-hidden">
           <div className="bg-surface-950">
             <video src={resolveMediaUrl(item.url) ?? item.url} controls preload="metadata" className="aspect-video w-full bg-surface-950 object-cover" />
           </div>
@@ -35,7 +35,7 @@ export function LibraryGrid({
               <a href={resolveMediaUrl(item.url) ?? item.url} target="_blank" rel="noreferrer" className="inline-flex flex-1 items-center justify-center rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-sky-400/40 hover:bg-slate-700/80">
                 Open
               </a>
-              <Button type="button" variant="danger" className="flex-1" onClick={() => onDelete(item.filename)}>
+              <Button type="button" variant="danger" className="flex-1" onClick={() => onDelete(item)}>
                 Delete
               </Button>
             </div>

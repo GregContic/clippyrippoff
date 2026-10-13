@@ -96,6 +96,41 @@ export interface RenderSettings {
   caption_highlight_color?: string | null;
 }
 
+export interface HookOverlaySettings {
+  text: string;
+  start_seconds: number;
+  duration_seconds: number;
+  position: 'top' | 'center' | 'bottom';
+  font_size: number;
+  color: string;
+  outline_width: number;
+  background_box: boolean;
+  background_color: string;
+}
+
+export interface ZoomInterval {
+  start_seconds: number;
+  end_seconds: number;
+  scale: number;
+}
+
+export interface EditingSettings {
+  schema_version: 1;
+  hook?: HookOverlaySettings;
+  zoom_intervals: ZoomInterval[];
+  music?: {
+    asset_id: string;
+    volume: number;
+    loop: boolean;
+    fade_in_seconds: number;
+    fade_out_seconds: number;
+    duck_original_audio: boolean;
+  };
+  caption_preset_id?: string;
+  transition: 'hard_cut' | 'crossfade';
+  transition_duration_seconds: number;
+}
+
 export interface CandidateEditorState {
   trim?: { start: number; end: number } | null;
   caption_segments: CaptionSegmentEdit[];
@@ -134,6 +169,8 @@ export interface RenderJob {
   updated_at: string;
   review_status: 'pending_review' | 'approved' | 'needs_changes';
   review_notes: string;
+  artifact_id?: string | null;
+  artifact_kind?: string | null;
 }
 
 export interface CaptionPreset {
@@ -152,6 +189,9 @@ export interface LibraryItem {
   duration?: number | null;
   review_status?: 'pending_review' | 'approved' | 'needs_changes';
   render_job_id?: string | null;
+  artifact_id?: string | null;
+  project_id?: string | null;
+  kind?: string;
 }
 
 export interface LibraryResponse {
@@ -166,6 +206,9 @@ export interface ProjectFileItem {
   duration?: number | null;
   candidate_id?: number | null;
   render_job_id?: string | null;
+  artifact_id?: string | null;
+  project_id?: string | null;
+  kind?: string;
 }
 
 export interface ProjectFilesResponse {
@@ -192,6 +235,66 @@ export interface Settings {
 export interface RenderResponse {
   video_id: string;
   render_job_ids: string[];
+}
+
+export interface BatchChild {
+  job_id: string;
+  status: string;
+  percent: number;
+  candidate_id?: number | null;
+  start?: number | null;
+  end?: number | null;
+  artifact_id?: string | null;
+  output_url?: string | null;
+  error?: string | null;
+}
+
+export interface BatchResponse {
+  batch_id: string;
+  project_id: string;
+  parent_job_id: string;
+  status: string;
+  percent: number;
+  child_job_ids: string[];
+  children: BatchChild[];
+  target_duration_seconds: number;
+  minimum_spacing_seconds: number;
+  created_at: string;
+  updated_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface CompilationSegment {
+  candidate_id: number;
+  start: number;
+  end: number;
+  duration: number;
+}
+
+export interface CompilationResponse {
+  compilation_id: string;
+  project_id: string;
+  parent_job_id: string;
+  status: string;
+  progress: number;
+  segments: CompilationSegment[];
+  effective_duration_seconds: number;
+  output_artifact_id?: string | null;
+  output_url?: string | null;
+  message?: string | null;
+  failure?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface ProjectMusicAsset {
+  asset_id: string;
+  project_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  duration_seconds: number;
 }
 
 export interface TrimOverride {

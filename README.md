@@ -88,6 +88,57 @@ Argon2id-compatible `argon2-cffi` hashing; session cookies are HttpOnly and
 only hashes of random session tokens are stored. State-changing browser
 requests also require the session-bound CSRF token and an allowed Origin.
 
+### Auto-Compilation
+
+The authenticated project workspace can submit an ordered compilation with
+`POST /api/projects/{video_id}/compilations`. The JSON body contains a
+`segments` array (`candidate_id` and optional `start`/`end` overrides),
+`max_total_duration_seconds`, and optional compatible `render_settings`.
+Array order is preserved exactly; moments are joined with hard cuts. When the
+total exceeds the preferred maximum, only the final moment may be shortened,
+and only when it remains at least the configured minimum clip duration.
+Otherwise the request is rejected. Each trim must stay within its candidate
+and source-video bounds, and duplicate candidate IDs are not supported.
+
+Poll `GET /api/compilations/{compilation_id}` for job status, progress,
+effective segment bounds and duration, and the output artifact URL after
+completion. The output is registered in the project's artifact metadata and
+appears in the Library. In-flight jobs are marked interrupted after a backend
+restart; they are not automatically resumed.
+
+### Smart Editing
+
+Render, batch, and compilation requests can optionally include a versioned
+`editing` object (`schema_version: 1`). Omitting it preserves the existing
+render path. It supports an opening hook, up to 12 non-overlapping bounded
+zoom intervals, an existing caption preset ID, and project-owned background
+music. Hook and zoom times are relative to each final clip or compilation.
+Zoom is applied to the rendered vertical frame, so already-burned captions
+also move with the image during a zoom interval.
+
+The project workspace's **Smart Editing** section exposes these settings.
+Authenticated clients can also upload and list project music with
+`POST /api/projects/{video_id}/music` (multipart field `file`) and
+`GET /api/projects/{video_id}/music`. Uploads are limited to 50 MiB and 30
+minutes, accept MP3, WAV, AAC, M4A, OGG, or FLAC, and are stored under a
+generated project-scoped key. The client selects an asset by its returned
+`asset_id`; storage keys and local paths are never accepted from requests.
+Music may loop, fade in/out, and use predictable audio-activity ducking:
+original audio is retained while it controls compression of the music. This
+is not speech recognition. When the source has no audio, selected music is
+the output audio track; without music, the output remains silent.
+
+Compilations remain hard cuts by default. Setting
+`editing.transition` to `crossfade` enables bounded video/audio overlap at
+each segment boundary; the overlap is deducted from the reported effective
+duration and preferred-duration calculation. Segment order is unchanged.
+Transition effects are compilation-only, while hooks, zoom, caption presets,
+and music are available on individual renders, batch children, and
+compilations. Caption presets use the existing ASS generation path, keeping
+source transcript cues relative to their trimmed segment. Hook text is
+escaped into a generated ASS subtitle file rather than interpolated into an
+FFmpeg filter expression.
+
 Phase 1 stores users and sessions in PostgreSQL through SQLAlchemy 2.x and
 Psycopg 3. The application uses the pooled `DATABASE_URL`; use the direct
 `DATABASE_URL_UNPOOLED` for Alembic migrations. Email addresses are trimmed

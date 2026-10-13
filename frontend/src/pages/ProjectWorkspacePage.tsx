@@ -2,17 +2,24 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   analyzeVideo,
+  createBatch,
+  createCompilation,
   deleteRender,
   deleteLibraryFile,
   getCandidates,
+  getCompilation,
   getProject,
   getProjectFiles,
+  getProjectMusic,
   getProjectRenders,
+  getBatch,
+  listCaptionPresets,
   renderCandidateOverride,
   renderCandidates,
   resolveMediaUrl,
+  uploadProjectMusic,
 } from '../api/client';
-import type { Candidate, CandidateEditorState, ProjectFileItem, ProjectSummary, RenderJob } from '../api/types';
+import type { BatchResponse, Candidate, CandidateEditorState, CaptionPreset, CompilationResponse, EditingSettings, ProjectFileItem, ProjectMusicAsset, ProjectSummary, RenderJob, ZoomInterval } from '../api/types';
 import { AnalysisProgress } from '../components/AnalysisProgress';
 import { CandidateEditorModal } from '../components/CandidateEditorModal';
 import { CandidateGrid } from '../components/CandidateGrid';
@@ -49,6 +56,33 @@ export function ProjectWorkspacePage() {
   const [candidateScoreMin, setCandidateScoreMin] = useState('');
   const [candidateDurationMin, setCandidateDurationMin] = useState('');
   const [candidateRenderStatus, setCandidateRenderStatus] = useState('all');
+  const [batch, setBatch] = useState<BatchResponse | null>(null);
+  const [batchTargetDuration, setBatchTargetDuration] = useState('30');
+  const [batchSpacing, setBatchSpacing] = useState('5');
+  const [batchMaxClips, setBatchMaxClips] = useState('');
+  const [batchCaptions, setBatchCaptions] = useState(true);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [compilation, setCompilation] = useState<CompilationResponse | null>(null);
+  const [compilationMaxDuration, setCompilationMaxDuration] = useState('90');
+  const [compilationCaptions, setCompilationCaptions] = useState(true);
+  const [compilationBusy, setCompilationBusy] = useState(false);
+  const [compilationTrims, setCompilationTrims] = useState<Record<number, { start: number; end: number }>>({});
+  const [captionPresets, setCaptionPresets] = useState<CaptionPreset[]>([]);
+  const [editingCaptionPresetId, setEditingCaptionPresetId] = useState('');
+  const [hookEnabled, setHookEnabled] = useState(false);
+  const [hookText, setHookText] = useState('');
+  const [hookPosition, setHookPosition] = useState<'top' | 'center' | 'bottom'>('center');
+  const [zoomIntervals, setZoomIntervals] = useState<ZoomInterval[]>([]);
+  const [musicAssets, setMusicAssets] = useState<ProjectMusicAsset[]>([]);
+  const [musicAssetId, setMusicAssetId] = useState('');
+  const [musicVolume, setMusicVolume] = useState('0.2');
+  const [musicLoop, setMusicLoop] = useState(true);
+  const [musicDuck, setMusicDuck] = useState(false);
+  const [musicFadeIn, setMusicFadeIn] = useState('0');
+  const [musicFadeOut, setMusicFadeOut] = useState('0');
+  const [musicUploading, setMusicUploading] = useState(false);
+  const [crossfadeEnabled, setCrossfadeEnabled] = useState(false);
+  const [crossfadeDuration, setCrossfadeDuration] = useState('0.5');
 
   async function loadWorkspace() {
     try {
@@ -94,6 +128,71 @@ export function ProjectWorkspacePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoId]);
 
+  useEffect(() => {
+    let active = true;
+    Promise.all([listCaptionPresets(), getProjectMusic(videoId)]).then(([presets, assets]) => {
+      if (active) {
+        setCaptionPresets(presets);
+        setMusicAssets(assets);
+        if (musicAssetId && !assets.some((asset) => asset.asset_id === musicAssetId)) {
+          setMusicAssetId('');
+        }
+      }
+    }).catch((cause: unknown) => {
+      if (active) {
+        setError(cause instanceof Error ? cause.message : 'Unable to load smart-editing assets.');
+      }
+    });
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoId]);
+
+  useEffect(() => {
+    if (!batch?.batch_id) {
+      return undefined;
+    }
+    let active = true;
+    const refresh = () => {
+      void getBatch(batch.batch_id).then((next) => {
+        if (active) {
+          setBatch(next);
+        }
+      }).catch(() => undefined);
+    };
+    const interval = window.setInterval(refresh, 2000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [batch?.batch_id]);
+
+  useEffect(() => {
+    if (!compilation?.compilation_id || !['queued', 'running'].includes(compilation.status)) {
+      return undefined;
+    }
+    let active = true;
+    const refresh = () => {
+      void getCompilation(compilation.compilation_id).then((next) => {
+        if (active) {
+          setCompilation(next);
+          if (next.status === 'completed') {
+            void loadWorkspace();
+          }
+        }
+      }).catch((cause: unknown) => {
+        if (active) {
+          setError(cause instanceof Error ? cause.message : 'Unable to refresh compilation status.');
+        }
+      });
+    };
+    const interval = window.setInterval(refresh, 2000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compilation?.compilation_id, compilation?.status]);
+
   const renderStatusByCandidateId = useMemo(() => {
     const map: Record<number, string> = {};
     [...renderJobs].sort((a, b) => (b.updated_at ?? b.created_at).localeCompare(a.updated_at ?? a.created_at)).forEach((job) => {
@@ -121,6 +220,20 @@ export function ProjectWorkspacePage() {
     });
   }, [candidateDurationMin, candidateRenderStatus, candidateScoreMin, candidates, renderStatusByCandidateId]);
 
+  const compilationSegments = selectedIds.flatMap((candidateId) => {
+    const candidate = candidates.find((item) => item.id === candidateId);
+    if (!candidate) {
+      return [];
+    }
+    const trim = compilationTrims[candidateId];
+    return [{
+      candidate,
+      start: trim?.start ?? candidate.trim_start ?? candidate.start,
+      end: trim?.end ?? candidate.trim_end ?? candidate.end,
+    }];
+  });
+  const compilationEstimatedDuration = compilationSegments.reduce((total, segment) => total + segment.end - segment.start, 0);
+
   function toggleCandidate(candidateId: number) {
     setSelectedIds((current) => (current.includes(candidateId) ? current.filter((id) => id !== candidateId) : [...current, candidateId]));
   }
@@ -133,6 +246,19 @@ export function ProjectWorkspacePage() {
     setSelectedIds([]);
   }
 
+  function moveCompilationSegment(candidateId: number, offset: number) {
+    setSelectedIds((current) => {
+      const index = current.indexOf(candidateId);
+      const destination = index + offset;
+      if (index < 0 || destination < 0 || destination >= current.length) {
+        return current;
+      }
+      const reordered = [...current];
+      [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
+      return reordered;
+    });
+  }
+
   async function renderSelected() {
     if (!selectedIds.length) {
       return;
@@ -140,7 +266,7 @@ export function ProjectWorkspacePage() {
     setRendering(true);
     setError(null);
     try {
-      await renderCandidates(videoId, selectedIds);
+      await renderCandidates(videoId, selectedIds, buildEditingSettings(false));
       setActiveTab('renders');
       await loadWorkspace();
     } catch (cause) {
@@ -154,13 +280,129 @@ export function ProjectWorkspacePage() {
     setRendering(true);
     setError(null);
     try {
-      await renderCandidateOverride(videoId, [candidate.id], { [String(candidate.id)]: { start, end } }, { [String(candidate.id)]: state });
+      await renderCandidateOverride(
+        videoId,
+        [candidate.id],
+        { [String(candidate.id)]: { start, end } },
+        { [String(candidate.id)]: state },
+        buildEditingSettings(false),
+      );
       setActiveTab('renders');
       await loadWorkspace();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to submit render job.');
     } finally {
       setRendering(false);
+    }
+  }
+
+  async function startBatch() {
+    const target = Number(batchTargetDuration);
+    const spacing = Number(batchSpacing);
+    const maxClips = batchMaxClips.trim() ? Number(batchMaxClips) : undefined;
+    if (!Number.isFinite(target) || !Number.isFinite(spacing) || (maxClips !== undefined && !Number.isInteger(maxClips))) {
+      setError('Enter valid batch duration, spacing, and clip count values.');
+      return;
+    }
+    setBatchBusy(true);
+    setError(null);
+    const editing = buildEditingSettings(false);
+    try {
+      const response = await createBatch(videoId, {
+        target_duration_seconds: target,
+        minimum_spacing_seconds: spacing,
+        ...(maxClips !== undefined ? { max_clips: maxClips } : {}),
+        ...(selectedIds.length ? { candidate_ids: selectedIds } : {}),
+        render_settings: { captions_enabled: batchCaptions },
+        ...(editing ? { editing } : {}),
+      });
+      setBatch(response);
+      setActiveTab('renders');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to start batch clips.');
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  async function startCompilation() {
+    const maxDuration = Number(compilationMaxDuration);
+    if (!compilationSegments.length || !Number.isFinite(maxDuration) || maxDuration <= 0) {
+      setError('Select at least one candidate and enter a valid maximum preferred duration.');
+      return;
+    }
+    setCompilationBusy(true);
+    setError(null);
+    const editing = buildEditingSettings(true);
+    try {
+      const response = await createCompilation(videoId, {
+        segments: compilationSegments.map(({ candidate, start, end }) => ({ candidate_id: candidate.id, start, end })),
+        max_total_duration_seconds: maxDuration,
+        render_settings: { captions_enabled: compilationCaptions },
+        ...(editing ? { editing } : {}),
+      });
+      setCompilation(response);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to start compilation.');
+    } finally {
+      setCompilationBusy(false);
+    }
+  }
+
+  function buildEditingSettings(includeTransition: boolean): EditingSettings | undefined {
+    const settings: EditingSettings = {
+      schema_version: 1,
+      zoom_intervals: zoomIntervals,
+      transition: includeTransition && crossfadeEnabled ? 'crossfade' : 'hard_cut',
+      transition_duration_seconds: includeTransition && crossfadeEnabled ? Number(crossfadeDuration) : 0.5,
+    };
+    if (hookEnabled) {
+      settings.hook = {
+        text: hookText,
+        start_seconds: 0,
+        duration_seconds: 2.5,
+        position: hookPosition,
+        font_size: 64,
+        color: '#FFFFFF',
+        outline_width: 3,
+        background_box: false,
+        background_color: '#000000',
+      };
+    }
+    if (musicAssetId) {
+      settings.music = {
+        asset_id: musicAssetId,
+        volume: Number(musicVolume),
+        loop: musicLoop,
+        fade_in_seconds: Number(musicFadeIn),
+        fade_out_seconds: Number(musicFadeOut),
+        duck_original_audio: musicDuck,
+      };
+    }
+    if (editingCaptionPresetId) {
+      settings.caption_preset_id = editingCaptionPresetId;
+    }
+    const hasEffects = Boolean(settings.hook || settings.zoom_intervals.length || settings.music || settings.caption_preset_id);
+    if (includeTransition && settings.transition === 'crossfade') {
+      return settings;
+    }
+    return hasEffects ? settings : undefined;
+  }
+
+  async function handleMusicUpload(file: File | undefined) {
+    if (!file) {
+      return;
+    }
+    setMusicUploading(true);
+    setError(null);
+    try {
+      const asset = await uploadProjectMusic(videoId, file);
+      setMusicAssets((current) => [...current, asset]);
+      setMusicAssetId(asset.asset_id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to upload music.');
+    } finally {
+      setMusicUploading(false);
     }
   }
 
@@ -311,6 +553,154 @@ export function ProjectWorkspacePage() {
               <Button type="button" variant="secondary" onClick={() => { setCandidateScoreMin(''); setCandidateDurationMin(''); setCandidateRenderStatus('all'); }}>Reset filters</Button>
               <Button type="button" onClick={() => setSelectedIds(filteredCandidates.map((candidate) => candidate.id))} disabled={!filteredCandidates.length}>Select filtered</Button>
             </div>
+          </Card>
+          <Card className="space-y-4 p-4">
+            <div>
+              <h3 className="text-lg font-semibold text-white">Smart Editing</h3>
+              <p className="mt-1 text-sm text-slate-400">Optional hook, bounded punch-ins, project-owned music, and a reusable caption style. These settings apply to individual renders and batch children; transitions apply only to compilations.</p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                <label className="flex items-center gap-2 text-sm text-slate-200">
+                  <input checked={hookEnabled} onChange={(event) => setHookEnabled(event.target.checked)} type="checkbox" />
+                  Opening hook overlay
+                </label>
+                {hookEnabled ? (
+                  <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_9rem]">
+                    <input value={hookText} onChange={(event) => setHookText(event.target.value)} maxLength={120} placeholder="Add a short opening hook" className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white" />
+                    <select value={hookPosition} onChange={(event) => setHookPosition(event.target.value as 'top' | 'center' | 'bottom')} className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+                      <option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option>
+                    </select>
+                  </div>
+                ) : null}
+              </div>
+              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm text-slate-200">Punch-in zoom intervals</span>
+                  <Button type="button" variant="secondary" onClick={() => setZoomIntervals((current) => {
+                    const start = current.length ? Math.max(...current.map((item) => item.end_seconds)) + 0.5 : 1;
+                    return start + 2 <= 600 ? [...current, { start_seconds: start, end_seconds: start + 2, scale: 1.15 }] : current;
+                  })} disabled={zoomIntervals.length >= 12 || Math.max(1, ...zoomIntervals.map((item) => item.end_seconds + 0.5)) + 2 > 600}>Add interval</Button>
+                </div>
+                {zoomIntervals.map((interval, index) => (
+                  <div key={`${index}-${interval.start_seconds}`} className="grid grid-cols-[1fr_1fr_1fr_auto] items-end gap-2">
+                    <label className="text-xs text-slate-400">Start<input type="number" min="0" max="600" step="0.1" value={interval.start_seconds} onChange={(event) => setZoomIntervals((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, start_seconds: Number(event.target.value) } : item))} className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white" /></label>
+                    <label className="text-xs text-slate-400">End<input type="number" min="0.1" max="600" step="0.1" value={interval.end_seconds} onChange={(event) => setZoomIntervals((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, end_seconds: Number(event.target.value) } : item))} className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white" /></label>
+                    <label className="text-xs text-slate-400">Scale<input type="number" min="1.05" max="1.35" step="0.05" value={interval.scale} onChange={(event) => setZoomIntervals((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, scale: Number(event.target.value) } : item))} className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white" /></label>
+                    <Button type="button" variant="danger" onClick={() => setZoomIntervals((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove zoom interval ${index + 1}`}>×</Button>
+                  </div>
+                ))}
+                {!zoomIntervals.length ? <p className="text-xs text-slate-500">No zoom intervals. Times are relative to each rendered clip or the final compilation.</p> : null}
+              </div>
+              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                <div className="text-sm text-slate-200">Background music</div>
+                <input type="file" accept=".mp3,.wav,.aac,.m4a,.ogg,.flac,audio/*" disabled={musicUploading} onChange={(event) => { void handleMusicUpload(event.target.files?.[0]); event.currentTarget.value = ''; }} className="block w-full text-sm text-slate-400 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-800 file:px-3 file:py-2 file:text-slate-200" />
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <select value={musicAssetId} onChange={(event) => setMusicAssetId(event.target.value)} className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white"><option value="">Music disabled</option>{musicAssets.map((asset) => <option key={asset.asset_id} value={asset.asset_id}>{asset.filename} · {formatDuration(asset.duration_seconds)}</option>)}</select>
+                  <label className="text-xs text-slate-400">Music volume<input type="number" min="0" max="1" step="0.05" value={musicVolume} onChange={(event) => setMusicVolume(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white" /></label>
+                  <label className="text-xs text-slate-400">Fade in (seconds)<input type="number" min="0" max="10" step="0.1" value={musicFadeIn} onChange={(event) => setMusicFadeIn(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white" /></label>
+                  <label className="text-xs text-slate-400">Fade out (seconds)<input type="number" min="0" max="10" step="0.1" value={musicFadeOut} onChange={(event) => setMusicFadeOut(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white" /></label>
+                </div>
+                <div className="flex flex-wrap gap-4 text-sm text-slate-300">
+                  <label className="flex items-center gap-2"><input checked={musicLoop} onChange={(event) => setMusicLoop(event.target.checked)} type="checkbox" />Loop to output length</label>
+                  <label className="flex items-center gap-2"><input checked={musicDuck} onChange={(event) => setMusicDuck(event.target.checked)} type="checkbox" />Duck music under original audio</label>
+                </div>
+                <p className="text-xs text-slate-500">Ducking responds to overall source audio activity, not speech recognition.</p>
+              </div>
+              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                <label className="block space-y-1 text-sm text-slate-300">
+                  <span>Caption preset</span>
+                  <select value={editingCaptionPresetId} onChange={(event) => setEditingCaptionPresetId(event.target.value)} className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-white">
+                    <option value="">Keep existing caption settings</option>
+                    {captionPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}{preset.built_in ? ' (built-in)' : ''}</option>)}
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-300">
+                  <input checked={crossfadeEnabled} onChange={(event) => setCrossfadeEnabled(event.target.checked)} type="checkbox" />
+                  Crossfade between compilation segments
+                </label>
+                {crossfadeEnabled ? <label className="block space-y-1 text-xs text-slate-400">Overlap duration (seconds)<input type="number" min="0.1" max="2" step="0.1" value={crossfadeDuration} onChange={(event) => setCrossfadeDuration(event.target.value)} className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white" /></label> : null}
+                <p className="text-xs text-slate-500">Crossfade shortens the final output by the overlap at each boundary. Individual clips and batch children remain hard-cut outputs.</p>
+              </div>
+            </div>
+          </Card>
+          <Card className="space-y-4 p-4">
+            <div>
+              <h3 className="text-lg font-semibold text-white">Auto-Compilation</h3>
+              <p className="mt-1 text-sm text-slate-400">Compiles selected moments as hard cuts in the order shown. If the preferred maximum is exceeded, only the final moment is shortened, and only when it remains renderable.</p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              <label className="space-y-1 text-sm text-slate-300">
+                <span className="text-xs uppercase tracking-[0.22em] text-slate-500">Maximum preferred duration (seconds)</span>
+                <input value={compilationMaxDuration} onChange={(event) => setCompilationMaxDuration(event.target.value)} type="number" min="1" max="600" step="0.5" className="w-full rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-sm text-white" />
+              </label>
+              <label className="flex items-end gap-2 pb-2 text-sm text-slate-300">
+                <input checked={compilationCaptions} onChange={(event) => setCompilationCaptions(event.target.checked)} type="checkbox" />
+                Burn in captions
+              </label>
+              <div className="flex items-end pb-2 text-sm text-slate-300">
+                Estimated output: {formatDuration(Math.min(compilationEstimatedDuration, Number(compilationMaxDuration) || 0))}
+                {compilationEstimatedDuration > (Number(compilationMaxDuration) || 0) ? ' (final segment may be trimmed)' : ''}
+              </div>
+            </div>
+            {compilationSegments.length ? (
+              <ol className="space-y-2">
+                {compilationSegments.map(({ candidate, start, end }, index) => (
+                  <li key={candidate.id} className="grid gap-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3 md:grid-cols-[minmax(0,1fr)_8rem_8rem_auto] md:items-end">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold text-white">{index + 1}. Candidate #{candidate.id}</div>
+                      <div className="mt-1 line-clamp-2 text-xs text-slate-400">{candidate.transcript || 'Transcript unavailable'}</div>
+                      <div className="mt-1 text-xs text-slate-500">{formatDuration(end - start)}</div>
+                    </div>
+                    <label className="space-y-1 text-xs text-slate-400">
+                      <span>Start (seconds)</span>
+                      <input value={start} onChange={(event) => setCompilationTrims((current) => ({ ...current, [candidate.id]: { start: Number(event.target.value), end } }))} type="number" min={candidate.start} max={candidate.end} step="0.1" className="w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-1.5 text-sm text-white" />
+                    </label>
+                    <label className="space-y-1 text-xs text-slate-400">
+                      <span>End (seconds)</span>
+                      <input value={end} onChange={(event) => setCompilationTrims((current) => ({ ...current, [candidate.id]: { start, end: Number(event.target.value) } }))} type="number" min={candidate.start} max={candidate.end} step="0.1" className="w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-1.5 text-sm text-white" />
+                    </label>
+                    <div className="flex gap-1">
+                      <Button type="button" variant="secondary" onClick={() => moveCompilationSegment(candidate.id, -1)} disabled={index === 0} aria-label={`Move candidate ${candidate.id} up`}>↑</Button>
+                      <Button type="button" variant="secondary" onClick={() => moveCompilationSegment(candidate.id, 1)} disabled={index === compilationSegments.length - 1} aria-label={`Move candidate ${candidate.id} down`}>↓</Button>
+                      <Button type="button" variant="danger" onClick={() => toggleCandidate(candidate.id)} aria-label={`Remove candidate ${candidate.id}`}>×</Button>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            ) : <p className="text-sm text-slate-500">Select moments below to build an ordered compilation.</p>}
+            <div className="flex flex-wrap items-center gap-3">
+              <Button type="button" onClick={() => void startCompilation()} disabled={compilationBusy || !compilationSegments.length || compilationSegments.length > 50}>
+                {compilationBusy ? 'Starting...' : 'Create compilation'}
+              </Button>
+              {compilationSegments.length > 50 ? <span className="text-xs text-amber-300">Select at most 50 moments.</span> : null}
+              {compilation ? <span className="text-sm text-slate-300">{compilation.status} · {Math.round(compilation.progress)}% · {formatDuration(compilation.effective_duration_seconds)}</span> : null}
+            </div>
+            {compilation?.message ? <p className="text-sm text-slate-400">{compilation.message}</p> : null}
+            {compilation?.failure ? <p className="text-sm text-rose-300">{compilation.failure}</p> : null}
+            {compilation?.status === 'completed' && compilation.output_url ? (
+              <div className="space-y-3">
+                <video src={resolveMediaUrl(compilation.output_url) ?? compilation.output_url} controls preload="metadata" className="max-h-96 w-full rounded-xl bg-black" />
+                <a href={resolveMediaUrl(compilation.output_url) ?? compilation.output_url} target="_blank" rel="noreferrer" className="inline-flex text-sm text-sky-300 underline underline-offset-4">Open completed compilation</a>
+              </div>
+            ) : null}
+          </Card>
+          <Card className="space-y-4 p-4">
+            <div>
+              <h3 className="text-lg font-semibold text-white">Batch Clips</h3>
+              <p className="mt-1 text-sm text-slate-400">Selects the highest-scoring distinct moments, trims each to at most the target duration, and renders independent vertical clips.</p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-4">
+              <label className="space-y-1 text-sm text-slate-300"><span className="text-xs uppercase tracking-[0.22em] text-slate-500">Target max seconds</span><input value={batchTargetDuration} onChange={(event) => setBatchTargetDuration(event.target.value)} type="number" min="1" step="0.5" className="w-full rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-sm text-white" /></label>
+              <label className="space-y-1 text-sm text-slate-300"><span className="text-xs uppercase tracking-[0.22em] text-slate-500">Minimum spacing</span><input value={batchSpacing} onChange={(event) => setBatchSpacing(event.target.value)} type="number" min="0" step="0.5" className="w-full rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-sm text-white" /></label>
+              <label className="space-y-1 text-sm text-slate-300"><span className="text-xs uppercase tracking-[0.22em] text-slate-500">Max clips</span><input value={batchMaxClips} onChange={(event) => setBatchMaxClips(event.target.value)} type="number" min="1" step="1" placeholder="Default" className="w-full rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-sm text-white" /></label>
+              <label className="flex items-end gap-2 pb-2 text-sm text-slate-300"><input checked={batchCaptions} onChange={(event) => setBatchCaptions(event.target.checked)} type="checkbox" /> Captions</label>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button type="button" onClick={() => void startBatch()} disabled={batchBusy || rendering || !candidates.length}>{batchBusy ? 'Starting...' : `Generate batch${selectedIds.length ? ` (${selectedIds.length} selected)` : ''}`}</Button>
+              {batch ? <span className="text-sm text-slate-400">{batch.status} · {Math.round(batch.percent)}% · {batch.children.filter((child) => child.status === 'completed').length}/{batch.children.length} completed</span> : null}
+            </div>
+            {batch?.children.length ? <div className="grid gap-2 sm:grid-cols-2">{batch.children.map((child) => <div key={child.job_id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm"><div className="flex justify-between text-slate-300"><span>Candidate #{child.candidate_id ?? '?'}</span><span>{child.status} · {Math.round(child.percent)}%</span></div>{child.output_url ? <a className="mt-2 inline-block text-sky-300 hover:text-sky-200" href={resolveMediaUrl(child.output_url) ?? child.output_url} target="_blank" rel="noreferrer">Open clip</a> : null}{child.error ? <div className="mt-1 text-danger-100">{child.error}</div> : null}</div>)}</div> : null}
           </Card>
           {candidates.length ? (
             <CandidateGrid

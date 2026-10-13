@@ -14,11 +14,18 @@ router = APIRouter(prefix="/api", tags=["renders"])
 
 
 @router.post("/videos/{video_id}/render", response_model=RenderResponse)
-def render_candidates(video_id: str, request: RenderRequest) -> RenderResponse:
+def render_candidates(video_id: str, request: RenderRequest, http_request: Request) -> RenderResponse:
     try:
         overrides = {int(candidate_id): trim for candidate_id, trim in request.overrides.items()}
         candidate_states = {int(candidate_id): state for candidate_id, state in request.candidate_states.items()}
-        job_ids = submit_renders(video_id, request.candidate_ids, overrides=overrides, candidate_states=candidate_states)
+        job_ids = submit_renders(
+            video_id,
+            request.candidate_ids,
+            overrides=overrides,
+            candidate_states=candidate_states,
+            editing=request.editing,
+            owner_id=http_request.state.user.id,
+        )
     except TrimValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:

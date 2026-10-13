@@ -12,6 +12,9 @@ from backend.api.media import router as media_router
 from backend.api.auth import router as auth_router
 from backend.api.projects import router as projects_router
 from backend.api.renders import router as renders_router
+from backend.api.batches import router as batches_router
+from backend.api.compilations import router as compilations_router
+from backend.api.music import router as music_router
 from backend.api.settings import router as settings_router
 from backend.api.videos import router as videos_router
 from backend.services.job_registry import job_registry
@@ -45,6 +48,9 @@ app.include_router(projects_router, dependencies=protected_dependency)
 app.include_router(candidates_router, dependencies=protected_dependency)
 app.include_router(caption_presets_router, dependencies=protected_dependency)
 app.include_router(renders_router, dependencies=protected_dependency)
+app.include_router(batches_router, dependencies=protected_dependency)
+app.include_router(compilations_router, dependencies=protected_dependency)
+app.include_router(music_router, dependencies=protected_dependency)
 app.include_router(library_router, dependencies=protected_dependency)
 app.include_router(media_router, dependencies=protected_dependency)
 app.include_router(settings_router, dependencies=protected_dependency)

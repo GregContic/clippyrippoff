@@ -33,24 +33,31 @@ export function AnalyzePage() {
 
 	const recentProjects = useMemo(() => [...projects].sort((left, right) => (right.latest_activity_at ?? right.updated_at ?? '').localeCompare(left.latest_activity_at ?? left.updated_at ?? '')).slice(0, 6), [projects]);
 
+	async function handleUpload(file: File) {
+		if (loading) {
+			return;
+		}
+		setLoading(true);
+		setError(null);
+		try {
+			const response = await uploadVideo(file);
+			navigate(`/projects/${response.video_id}`);
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : 'Unable to upload the video.');
+		} finally {
+			setLoading(false);
+		}
+	}
+
 	async function handleAnalyze() {
+		if (loading) {
+			return;
+		}
 		if (!url.trim()) {
 			setError('Paste a supported video URL first.');
 			return;
 		}
 
-		async function handleUpload(file: File) {
-			setLoading(true);
-			setError(null);
-			try {
-				const response = await uploadVideo(file);
-				navigate(`/projects/${response.video_id}`);
-			} catch (cause) {
-				setError(cause instanceof Error ? cause.message : 'Unable to upload the video.');
-			} finally {
-				setLoading(false);
-			}
-		}
 		setLoading(true);
 		setError(null);
 		try {

@@ -47,6 +47,14 @@ class FakeS3:
         return {"Contents": [{"Key": key} for key in self.objects if key.startswith(Prefix)]}
 
 
+class PaginatedFakeS3(FakeS3):
+    def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):
+        keys = sorted(key for key in self.objects if key.startswith(Prefix))
+        if ContinuationToken is None:
+            return {"Contents": [{"Key": keys[0]}], "IsTruncated": True, "NextContinuationToken": "page-2"}
+        return {"Contents": [{"Key": key} for key in keys[1:]], "IsTruncated": False}
+
+
 class TestStorage(unittest.TestCase):
     def test_s3_transfers_stream_through_mock_client(self):
         settings = StorageSettings("r2", Path("processing/temp"), "bucket", "endpoint", "key", "secret")
@@ -68,3 +76,10 @@ class TestStorage(unittest.TestCase):
             source.write_text("ok", encoding="utf-8")
             backend.upload_file(source, "objects/source.txt")
             self.assertEqual(backend.get_bytes("objects/source.txt"), b"ok")
+
+    def test_s3_listing_reads_all_pages(self):
+        client = PaginatedFakeS3()
+        client.objects = {"projects/a": b"a", "projects/b": b"b"}
+        settings = StorageSettings("r2", Path("processing/temp"), "bucket", "endpoint", "key", "secret")
+        backend = S3Storage(settings, client=client)
+        self.assertEqual(list(backend.list_keys("projects/")), ["projects/a", "projects/b"])

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+import shutil
 import threading
+import uuid
 from pathlib import Path
 
 from backend.core import PROJECT_ROOT  # noqa: F401 - ensures scripts/ is on sys.path
@@ -26,6 +28,10 @@ from scripts.utils import (
     validate_clip_range,
 )
 from backend.services.storage import storage
+from backend.schemas import EditingSettings
+from backend.services.music_asset_service import download_project_music
+from backend.services.project_service import find_music_asset, project_owner_id
+from backend.services.smart_editing import apply_caption_preset, apply_smart_effects, validate_editing_timing
 
 
 class TrimValidationError(ValueError):
@@ -127,6 +133,10 @@ def submit_renders(
     overrides: dict[int, object] | None = None,
     candidate_states: dict[int, object] | None = None,
     retry_of: str | None = None,
+    batch_id: str | None = None,
+    preflight_only: bool = False,
+    editing: EditingSettings | dict | None = None,
+    owner_id: str | None = None,
 ) -> list[str]:
     selected = validate_candidate_ids(video_id, candidate_ids)
     override_map = overrides or {}
@@ -150,6 +160,15 @@ def submit_renders(
 
     base_config = load_config()
     source_duration = float(source_info.get("duration")) if source_info.get("duration") is not None else None
+    editing_settings = EditingSettings.model_validate(editing) if editing is not None else None
+    if editing_settings is not None and editing_settings.transition != "hard_cut":
+        raise ValueError("Compilation transitions are only supported for Auto-Compilation.")
+    if editing_settings is not None and editing_settings.music is not None:
+        if owner_id is None or project_owner_id(video_id) != owner_id:
+            raise FileNotFoundError("Project not found.")
+        if find_music_asset(video_id, editing_settings.music.asset_id, owner_id=owner_id) is None:
+            raise ValueError("The selected project music asset was not found.")
+    base_config = apply_caption_preset(base_config, editing_settings)
 
     request_snapshots: dict[int, dict] = {}
     for candidate_id, candidate in selected.items():
@@ -165,6 +184,8 @@ def submit_renders(
             source_duration=source_duration,
         )
         effective_config = _render_config_for(base_config, candidate_state)
+        if editing_settings is not None:
+            validate_editing_timing(editing_settings, end - start)
         request_signature = {
             "video_id": video_id,
             "candidate_id": candidate_id,
@@ -180,6 +201,8 @@ def submit_renders(
             },
             "caption_segments": _caption_segments_for(candidate_state, []),
         }
+        if editing_settings is not None:
+            request_signature["editing"] = editing_settings.model_dump()
         request_snapshots[candidate_id] = request_signature
 
     for existing in job_registry.list():
@@ -190,6 +213,9 @@ def submit_renders(
             existing_signature = existing.result.get("request_signature")
         if existing_signature in request_snapshots.values():
             raise ValueError("An identical render job is already queued or running.")
+
+    if preflight_only:
+        return []
 
     job_ids: list[str] = []
     for candidate_id, candidate in selected.items():
@@ -203,13 +229,25 @@ def submit_renders(
             candidate_id=candidate_id,
             stage="queued",
             message="Waiting",
-            result={"request_signature": request_signature},
+            result={"request_signature": request_signature, **({"batch_id": batch_id} if batch_id else {})},
             retry_of=retry_of,
             percent=0.0,
+            artifact_id=f"artifact-{uuid.uuid4().hex}",
+            artifact_kind="clip",
         )
 
-        def _runner(job_id: str, selected_candidate: dict = candidate, trim_override: object | None = selected_override, selected_state: dict = candidate_state, selected_config: dict = effective_config, signature: dict = request_signature) -> None:
+        def _runner(
+            job_id: str,
+            selected_candidate: dict = candidate,
+            trim_override: object | None = selected_override,
+            selected_state: dict = candidate_state,
+            selected_config: dict = effective_config,
+            signature: dict = request_signature,
+            selected_editing: EditingSettings | None = editing_settings,
+            selected_owner: str | None = owner_id,
+        ) -> None:
             ass_path: Path | None = None
+            effect_temp_dir: Path | None = None
             try:
                 metadata_local = load_project_metadata(video_id) or {}
                 source_path_local = Path(metadata_local.get("source_path") or "")
@@ -236,7 +274,10 @@ def submit_renders(
                 if cues and _captions_enabled_for(selected_config, selected_state):
                     ass_path = PROCESSING_TEMP_DIR / f"{video_id}_{candidate_id}.ass"
                     write_ass_subtitles(cues, selected_config, ass_path)
-                output_path = generate_output_filename(OUTPUT_SHORTS_DIR)
+                artifact_id = job_registry.get(job_id).artifact_id if job_registry.get(job_id) else None
+                if not artifact_id:
+                    raise RuntimeError("Render artifact identity is missing.")
+                output_path = OUTPUT_SHORTS_DIR / f"short_{artifact_id}.mp4"
                 expected_duration = max(end - start, 0.001)
 
                 def on_progress(progress: dict[str, str]) -> None:
@@ -252,12 +293,51 @@ def submit_renders(
 
                 job_registry.update(job_id, status="running", stage="rendering", message="Rendering captions...", percent=0.0)
                 render_short(source_path_local, start, end, selected_config, ass_path, output_path, progress_callback=on_progress)
-                problems = verify_output(output_path, selected_config, expected_duration=end - start)
+                if selected_editing is not None:
+                    effect_temp_dir = PROCESSING_TEMP_DIR / "smart-editing" / job_id
+                    music_path = None
+                    if selected_editing.music is not None:
+                        if selected_owner is None:
+                            raise FileNotFoundError("Project music owner is unavailable.")
+                        music_path = download_project_music(
+                            video_id,
+                            selected_editing.music.asset_id,
+                            owner_id=selected_owner,
+                            destination_dir=effect_temp_dir,
+                        )
+                    apply_smart_effects(
+                        output_path,
+                        settings=selected_editing,
+                        duration_seconds=end - start,
+                        config=selected_config,
+                        has_original_audio=bool(source_info.get("has_audio")),
+                        temp_dir=effect_temp_dir or PROCESSING_TEMP_DIR,
+                        music_path=music_path,
+                    )
+                require_audio = (
+                    selected_editing is None
+                    or bool(source_info.get("has_audio"))
+                    or (selected_editing.music is not None)
+                )
+                problems = verify_output(
+                    output_path,
+                    selected_config,
+                    expected_duration=end - start,
+                    require_audio=require_audio,
+                )
                 if problems:
                     raise RuntimeError("; ".join(problems))
-                output_key = f"projects/{video_id}/renders/{output_path.name}"
+                output_key = f"projects/{video_id}/renders/{artifact_id}/{output_path.name}"
+                if storage.exists(output_key):
+                    raise RuntimeError("Render output already exists; refusing to overwrite it.")
                 storage.upload_file(output_path, output_key, "video/mp4")
-                register_render_output(video_id, output_path.name)
+                register_render_output(
+                    video_id,
+                    output_path.name,
+                    artifact_id=artifact_id,
+                    job_id=job_id,
+                    storage_key=output_key,
+                )
                 patched = patch_project_metadata(
                     video_id,
                     status=metadata_local.get("status", "completed"),
@@ -271,17 +351,31 @@ def submit_renders(
                     stage="complete",
                     message="Complete",
                     output_path=str(output_path),
-                    output_url=f"/api/media/renders/{video_id}/{output_path.name}",
+                    output_url=f"/api/media/artifacts/{artifact_id}",
                     percent=100.0,
-                    result={"request_signature": signature, "start": start, "end": end, "render_settings": signature["render_settings"], "output_storage_key": output_key},
+                    result={"request_signature": signature, "start": start, "end": end, "render_settings": signature["render_settings"], "output_storage_key": output_key, "artifact_id": artifact_id, **({"batch_id": batch_id} if batch_id else {})},
                 )
+                if batch_id:
+                    from backend.services.batch_service import refresh_batch
+
+                    refresh_batch(batch_id)
             except Exception as exc:
                 if ass_path is not None:
                     ass_path.unlink(missing_ok=True)
-                job_registry.update(job_id, status="failed", stage="failed", message="Rendering failed.", error=str(exc), result={"request_signature": signature})
+                job_registry.update(job_id, status="failed", stage="failed", message="Rendering failed.", error=str(exc), result={"request_signature": signature, **({"batch_id": batch_id} if batch_id else {})})
+                if batch_id:
+                    from backend.services.batch_service import refresh_batch
+
+                    refresh_batch(batch_id)
             else:
                 if ass_path is not None:
                     ass_path.unlink(missing_ok=True)
+            finally:
+                if effect_temp_dir is not None:
+                    try:
+                        shutil.rmtree(effect_temp_dir)
+                    except FileNotFoundError:
+                        pass
 
         thread = threading.Thread(target=_runner, args=(record.id,), daemon=True)
         thread.start()
@@ -345,4 +439,6 @@ def retry_render_job(job_id: str) -> list[str]:
         [candidate_id],
         candidate_states={candidate_id: candidate_state},
         retry_of=record.id,
+        editing=request.get("editing"),
+        owner_id=project_owner_id(request.get("video_id", record.video_id or "")),
     )

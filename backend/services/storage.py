@@ -6,6 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+try:
+    from botocore.exceptions import BotoCoreError, ClientError
+except ImportError:  # boto3 is loaded lazily when R2 is configured.
+    class BotoCoreError(Exception):
+        pass
+
+    class ClientError(Exception):
+        pass
+
 
 class StorageError(RuntimeError):
     """Raised when configured object storage cannot complete an operation."""
@@ -62,6 +71,9 @@ class StorageBackend:
 
     def list_keys(self, prefix: str) -> Iterable[str]:
         return ()
+
+    def object_size(self, key: str) -> int | None:
+        return None
 
     def open_stream(self, key: str):
         raise NotImplementedError
@@ -154,8 +166,13 @@ class S3Storage(StorageBackend):
     def exists(self, key: str) -> bool:
         try:
             self.client.head_object(Bucket=self.bucket, Key=key)
-        except self.client.exceptions.ClientError:
-            return False
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                return False
+            raise StorageError("Object storage existence check failed.") from exc
+        except BotoCoreError as exc:
+            raise StorageError("Object storage existence check failed.") from exc
         return True
 
     def delete(self, key: str) -> None:
@@ -167,8 +184,28 @@ class S3Storage(StorageBackend):
         )
 
     def list_keys(self, prefix: str) -> Iterable[str]:
-        response = self.client.list_objects_v2(Bucket=self.bucket, Prefix=prefix)
-        return (item["Key"] for item in response.get("Contents", []))
+        try:
+            keys: list[str] = []
+            request: dict[str, str] = {"Bucket": self.bucket, "Prefix": prefix}
+            while True:
+                response = self.client.list_objects_v2(**request)
+                keys.extend(item["Key"] for item in response.get("Contents", []))
+                if not response.get("IsTruncated"):
+                    return keys
+                token = response.get("NextContinuationToken")
+                if not token:
+                    raise StorageError("Object storage listing returned no continuation token.")
+                request["ContinuationToken"] = token
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError("Object storage listing failed.") from exc
+
+    def object_size(self, key: str) -> int | None:
+        try:
+            response = self.client.head_object(Bucket=self.bucket, Key=key)
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError("Object storage metadata lookup failed.") from exc
+        value = response.get("ContentLength")
+        return int(value) if value is not None else None
 
     def open_stream(self, key: str):
         return self.client.get_object(Bucket=self.bucket, Key=key)["Body"]

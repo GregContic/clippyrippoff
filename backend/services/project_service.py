@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from backend.core import PROJECT_ROOT
 from backend.services.job_registry import job_registry
-from backend.services.storage import S3Storage, storage
+from backend.services.storage import S3Storage, StorageError, storage
 from scripts.utils import OUTPUT_SHORTS_DIR, PROCESSING_TEMP_DIR, get_media_info, run_subprocess
 
 
@@ -18,6 +20,7 @@ def _now() -> str:
 
 PROJECT_CACHE_DIR = PROCESSING_TEMP_DIR / "youtube"
 VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,}$")
+_PROJECT_METADATA_LOCK = threading.RLock()
 
 
 def project_dir(video_id: str) -> Path:
@@ -57,29 +60,35 @@ def source_path(video_id: str) -> Path | None:
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        key = _storage_key(path)
-        if key is None or not isinstance(storage, S3Storage) or not storage.exists(key):
-            return None
+    with _PROJECT_METADATA_LOCK:
+        if not path.exists():
+            key = _storage_key(path)
+            if key is None or not isinstance(storage, S3Storage) or not storage.exists(key):
+                return None
+            try:
+                payload = json.loads(storage.get_bytes(key).decode("utf-8"))
+                return payload if isinstance(payload, dict) else None
+            except (OSError, ValueError, UnicodeDecodeError):
+                return None
         try:
-            payload = json.loads(storage.get_bytes(key).decode("utf-8"))
-            return payload if isinstance(payload, dict) else None
-        except (OSError, ValueError, UnicodeDecodeError):
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp_path.replace(path)
-    key = _storage_key(path)
-    if key is not None and isinstance(storage, S3Storage):
-        storage.put_bytes(key, json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8"), "application/json")
+    with _PROJECT_METADATA_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        encoded = json.dumps(payload, indent=2, ensure_ascii=False)
+        try:
+            tmp_path.write_text(encoded, encoding="utf-8")
+            tmp_path.replace(path)
+            key = _storage_key(path)
+            if key is not None and isinstance(storage, S3Storage):
+                storage.put_bytes(key, encoded.encode("utf-8"), "application/json")
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
 
 def _storage_key(path: Path) -> str | None:
@@ -108,18 +117,20 @@ def output_owner_id(filename: str) -> str | None:
 
 
 def save_project_metadata(video_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    data = dict(payload)
-    data.setdefault("video_id", video_id)
-    data.setdefault("created_at", _now())
-    data["updated_at"] = _now()
-    write_json(metadata_path(video_id), data)
-    return data
+    with _PROJECT_METADATA_LOCK:
+        data = dict(payload)
+        data.setdefault("video_id", video_id)
+        data.setdefault("created_at", _now())
+        data["updated_at"] = _now()
+        write_json(metadata_path(video_id), data)
+        return data
 
 
 def patch_project_metadata(video_id: str, **updates: Any) -> dict[str, Any]:
-    current = load_project_metadata(video_id) or {}
-    current.update(updates)
-    return save_project_metadata(video_id, current)
+    with _PROJECT_METADATA_LOCK:
+        current = load_project_metadata(video_id) or {}
+        current.update(updates)
+        return save_project_metadata(video_id, current)
 
 
 def save_candidates(video_id: str, payload: dict[str, Any]) -> Path:
@@ -248,14 +259,223 @@ def _rendered_outputs(metadata: dict[str, Any]) -> list[str]:
     return [str(output) for output in outputs if isinstance(output, str)]
 
 
-def register_render_output(video_id: str, filename: str) -> dict[str, Any]:
+def register_render_output(
+    video_id: str,
+    filename: str,
+    *,
+    artifact_id: str | None = None,
+    job_id: str | None = None,
+    storage_key: str | None = None,
+    status: str = "completed",
+    artifact_kind: str = "clip",
+) -> dict[str, Any]:
+    with _PROJECT_METADATA_LOCK:
+        metadata = load_project_metadata(video_id) or {}
+        artifact_id = artifact_id or f"artifact-{uuid.uuid4().hex}"
+        owner_id = project_owner_id(video_id)
+        artifacts = metadata.get("artifacts", [])
+        if not isinstance(artifacts, list):
+            artifacts = []
+        existing = next((item for item in artifacts if isinstance(item, dict) and item.get("artifact_id") == artifact_id), None)
+        artifact = dict(existing) if isinstance(existing, dict) else {
+            "artifact_id": artifact_id,
+            "project_id": video_id,
+            "owner_id": owner_id,
+            "job_id": job_id,
+            "kind": artifact_kind,
+            "filename": filename,
+            "created_at": _now(),
+        }
+        artifact.update({"filename": filename, "storage_key": storage_key, "status": status})
+        if job_id is not None:
+            artifact["job_id"] = job_id
+        if existing is None:
+            artifacts.append(artifact)
+        else:
+            artifacts[artifacts.index(existing)] = artifact
+        metadata["artifacts"] = artifacts
+        rendered_outputs = _rendered_outputs(metadata)
+        if filename not in rendered_outputs:
+            rendered_outputs.append(filename)
+        metadata["rendered_outputs"] = rendered_outputs
+        metadata["rendered_count"] = len(rendered_outputs)
+        return save_project_metadata(video_id, metadata)
+
+
+def _artifact_records(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    records = metadata.get("artifacts", [])
+    return [record for record in records if isinstance(record, dict) and isinstance(record.get("artifact_id"), str)]
+
+
+def save_batch_record(video_id: str, batch: dict[str, Any]) -> dict[str, Any]:
+    with _PROJECT_METADATA_LOCK:
+        metadata = load_project_metadata(video_id) or {}
+        batches = metadata.get("batches", [])
+        if not isinstance(batches, list):
+            batches = []
+        existing = next((item for item in batches if isinstance(item, dict) and item.get("batch_id") == batch.get("batch_id")), None)
+        if existing is None:
+            batches.append(dict(batch))
+        else:
+            batches[batches.index(existing)] = {**existing, **batch}
+        metadata["batches"] = batches
+        return save_project_metadata(video_id, metadata)
+
+
+def find_batch(batch_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+    project_ids: set[str] = {path.parent.name for path in PROJECT_CACHE_DIR.glob("*/metadata.json")}
+    if isinstance(storage, S3Storage):
+        for key in storage.list_keys("state/youtube/"):
+            parts = key.split("/")
+            if len(parts) == 4 and parts[0:2] == ["state", "youtube"] and parts[3] == "metadata.json":
+                project_ids.add(parts[2])
+    for video_id in project_ids:
+        metadata = load_project_metadata(video_id)
+        if not metadata:
+            continue
+        if owner_id is not None and project_owner_id(video_id) != owner_id:
+            continue
+        batches = metadata.get("batches", [])
+        if not isinstance(batches, list):
+            continue
+        for batch in batches:
+            if isinstance(batch, dict) and batch.get("batch_id") == batch_id:
+                return dict(batch)
+    return None
+
+
+def save_compilation_record(video_id: str, compilation: dict[str, Any]) -> dict[str, Any]:
+    with _PROJECT_METADATA_LOCK:
+        metadata = load_project_metadata(video_id) or {}
+        compilations = metadata.get("compilations", [])
+        if not isinstance(compilations, list):
+            compilations = []
+        existing = next(
+            (
+                item
+                for item in compilations
+                if isinstance(item, dict) and item.get("compilation_id") == compilation.get("compilation_id")
+            ),
+            None,
+        )
+        if existing is None:
+            compilations.append(dict(compilation))
+        else:
+            compilations[compilations.index(existing)] = {**existing, **compilation}
+        metadata["compilations"] = compilations
+        return save_project_metadata(video_id, metadata)
+
+
+def save_music_asset(video_id: str, asset: dict[str, Any]) -> dict[str, Any]:
+    with _PROJECT_METADATA_LOCK:
+        metadata = load_project_metadata(video_id) or {}
+        assets = metadata.get("music_assets", [])
+        if not isinstance(assets, list):
+            assets = []
+        if any(isinstance(item, dict) and item.get("asset_id") == asset.get("asset_id") for item in assets):
+            raise ValueError("Music asset identity already exists.")
+        assets.append(dict(asset))
+        metadata["music_assets"] = assets
+        return save_project_metadata(video_id, metadata)
+
+
+def list_music_assets(video_id: str, *, owner_id: str) -> list[dict[str, Any]]:
+    if project_owner_id(video_id) != owner_id:
+        raise FileNotFoundError("Project not found.")
     metadata = load_project_metadata(video_id) or {}
-    rendered_outputs = _rendered_outputs(metadata)
-    if filename not in rendered_outputs:
-        rendered_outputs.append(filename)
-    metadata["rendered_outputs"] = rendered_outputs
-    metadata["rendered_count"] = len(rendered_outputs)
-    return save_project_metadata(video_id, metadata)
+    assets = metadata.get("music_assets", [])
+    return [
+        {key: value for key, value in item.items() if key not in {"storage_key", "owner_id"}}
+        for item in assets
+        if isinstance(item, dict) and item.get("owner_id") == owner_id
+    ] if isinstance(assets, list) else []
+
+
+def find_music_asset(video_id: str, asset_id: str, *, owner_id: str) -> dict[str, Any] | None:
+    if project_owner_id(video_id) != owner_id:
+        return None
+    metadata = load_project_metadata(video_id) or {}
+    assets = metadata.get("music_assets", [])
+    if not isinstance(assets, list):
+        return None
+    for item in assets:
+        if isinstance(item, dict) and item.get("asset_id") == asset_id and item.get("owner_id") == owner_id:
+            return dict(item)
+    return None
+
+
+def find_compilation(compilation_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+    project_ids: set[str] = {path.parent.name for path in PROJECT_CACHE_DIR.glob("*/metadata.json")}
+    if isinstance(storage, S3Storage):
+        for key in storage.list_keys("state/youtube/"):
+            parts = key.split("/")
+            if len(parts) == 4 and parts[0:2] == ["state", "youtube"] and parts[3] == "metadata.json":
+                project_ids.add(parts[2])
+    for video_id in project_ids:
+        metadata = load_project_metadata(video_id)
+        if not metadata:
+            continue
+        if owner_id is not None and project_owner_id(video_id) != owner_id:
+            continue
+        compilations = metadata.get("compilations", [])
+        if not isinstance(compilations, list):
+            continue
+        for compilation in compilations:
+            if not isinstance(compilation, dict) or compilation.get("compilation_id") != compilation_id:
+                continue
+            if owner_id is not None and compilation.get("owner_id") != owner_id:
+                return None
+            return dict(compilation)
+    return None
+
+
+def find_artifact(artifact_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+    project_ids: set[str] = {path.parent.name for path in PROJECT_CACHE_DIR.glob("*/metadata.json")}
+    if isinstance(storage, S3Storage):
+        for key in storage.list_keys("state/youtube/"):
+            parts = key.split("/")
+            if len(parts) == 4 and parts[0:2] == ["state", "youtube"] and parts[3] == "metadata.json":
+                project_ids.add(parts[2])
+    for video_id in project_ids:
+        metadata = load_project_metadata(video_id)
+        if not metadata:
+            continue
+        for artifact in _artifact_records(metadata):
+            if artifact.get("artifact_id") == artifact_id:
+                if owner_id is not None and artifact.get("owner_id") != owner_id:
+                    return None
+                return dict(artifact)
+    for job in job_registry.list():
+        if job.artifact_id == artifact_id and job.video_id:
+            if owner_id is not None and project_owner_id(job.video_id) != owner_id:
+                return None
+            result = job.result if isinstance(job.result, dict) else {}
+            return {
+                "artifact_id": artifact_id,
+                "project_id": job.video_id,
+                "owner_id": project_owner_id(job.video_id),
+                "job_id": job.id,
+                "kind": job.artifact_kind or "clip",
+                "filename": Path(job.output_path).name if job.output_path else None,
+                "storage_key": result.get("output_storage_key"),
+                "status": job.status,
+            }
+    return None
+
+
+def delete_artifact(artifact_id: str, owner_id: str) -> None:
+    artifact = find_artifact(artifact_id, owner_id)
+    if artifact is None:
+        raise FileNotFoundError(artifact_id)
+    filename = artifact.get("filename")
+    if not isinstance(filename, str):
+        raise FileNotFoundError(artifact_id)
+    key = artifact.get("storage_key")
+    if isinstance(key, str) and storage.exists(key):
+        storage.delete(key)
+    local = safe_output_path(filename)
+    if local.exists():
+        local.unlink()
 
 
 def _thumbnail_url(video_id: str, metadata: dict[str, Any]) -> str | None:
@@ -317,6 +537,14 @@ def _render_jobs_for_video(video_id: str) -> list[Any]:
     return [record for record in job_registry.list() if record.kind == "render" and record.video_id == video_id]
 
 
+def _output_jobs_for_video(video_id: str) -> list[Any]:
+    return [
+        record
+        for record in job_registry.list()
+        if record.kind in {"render", "compilation"} and record.video_id == video_id
+    ]
+
+
 def _analysis_job_for(video_id: str, metadata: dict[str, Any]) -> Any | None:
     job_id = metadata.get("analysis_job_id")
     if isinstance(job_id, str):
@@ -361,7 +589,7 @@ def project_render_jobs(video_id: str, *, owner_id: str) -> list[dict[str, Any]]
 def project_files(video_id: str) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     seen: set[str] = set()
-    jobs = _render_jobs_for_video(video_id)
+    jobs = _output_jobs_for_video(video_id)
     job_lookup: dict[str, Any] = {}
     for job in jobs:
         output_name = None
@@ -388,16 +616,22 @@ def project_files(video_id: str) -> list[dict[str, Any]]:
             end = request_signature.get("end")
             if isinstance(start, (int, float)) and isinstance(end, (int, float)):
                 duration = float(end) - float(start)
+        result = job.result if isinstance(job.result, dict) else {}
+        if duration is None and isinstance(result.get("effective_duration_seconds"), (int, float)):
+            duration = float(result["effective_duration_seconds"])
         stat = output_file.stat() if output_file.exists() else None
         files.append(
             {
                 "filename": output_name,
-                "url": f"/media/shorts/{output_name}",
+                "url": f"/api/media/artifacts/{job.artifact_id}" if job.artifact_id else f"/media/shorts/{output_name}",
                 "size_bytes": stat.st_size if stat is not None else 0,
                 "created_at": job.updated_at,
                 "duration": duration,
                 "candidate_id": job.candidate_id,
                 "render_job_id": job.id,
+                "artifact_id": job.artifact_id,
+                "project_id": video_id,
+                "kind": job.artifact_kind or "clip",
             }
         )
     return files
@@ -467,12 +701,15 @@ def project_files(video_id: str) -> list[dict[str, Any]]:
         files.append(
             {
                 "filename": output_name,
-                "url": f"/media/shorts/{output_name}",
+                "url": f"/api/media/artifacts/{job.artifact_id}" if job.artifact_id else f"/media/shorts/{output_name}",
                 "size_bytes": stat.st_size if stat is not None else 0,
                 "created_at": job.updated_at,
                 "duration": duration,
                 "candidate_id": job.candidate_id,
                 "render_job_id": job.id,
+                "artifact_id": job.artifact_id,
+                "project_id": video_id,
+                "kind": job.artifact_kind or "clip",
             }
         )
 
@@ -501,12 +738,15 @@ def project_files(video_id: str) -> list[dict[str, Any]]:
         files.append(
             {
                 "filename": output_name,
-                "url": f"/media/shorts/{output_name}",
+                "url": f"/api/media/artifacts/{job.artifact_id}" if job is not None and job.artifact_id else f"/media/shorts/{output_name}",
                 "size_bytes": stat.st_size if stat is not None else 0,
                 "created_at": created_at,
                 "duration": duration,
                 "candidate_id": candidate_id,
                 "render_job_id": render_job_id,
+                "artifact_id": job.artifact_id if job is not None else None,
+                "project_id": video_id,
+                "kind": job.artifact_kind if job is not None and job.artifact_kind else "clip",
             }
         )
     return files
@@ -599,7 +839,12 @@ def project_summary(video_id: str) -> dict[str, Any] | None:
         "source_video_url": _source_url(video_id),
         "transcript_url": _transcript_url(video_id),
         "candidates_url": _candidates_url(video_id),
-        "rendered_urls": [f"/media/shorts/{filename}" for filename in rendered_outputs],
+        "rendered_urls": [
+            f"/api/media/artifacts/{artifact.get('artifact_id')}"
+            if (artifact := next((item for item in _artifact_records(metadata) if item.get("filename") == filename), None))
+            else f"/media/shorts/{filename}"
+            for filename in rendered_outputs
+        ],
         "created_at": metadata.get("created_at"),
         "updated_at": metadata.get("updated_at"),
         "analysis_job_id": metadata.get("analysis_job_id"),
@@ -639,14 +884,17 @@ def safe_output_path(filename: str) -> Path:
 
 
 def list_library_items(owner_id: str | None = None) -> list[dict[str, Any]]:
-    if not OUTPUT_SHORTS_DIR.exists():
-        return []
     items: list[dict[str, Any]] = []
-    jobs_by_filename = {}
+    seen: set[tuple[str | None, str]] = set()
+    jobs_by_filename: dict[tuple[str | None, str], Any] = {}
     for job in job_registry.list():
-        if job.output_path:
-            jobs_by_filename[Path(job.output_path).name] = job
-    for path in sorted(OUTPUT_SHORTS_DIR.glob("*.mp4"), reverse=True):
+        if job.output_path and job.video_id:
+            jobs_by_filename[(job.video_id, Path(job.output_path).name)] = job
+    if OUTPUT_SHORTS_DIR.exists():
+        local_paths = sorted(OUTPUT_SHORTS_DIR.glob("*.mp4"), reverse=True)
+    else:
+        local_paths = []
+    for path in local_paths:
         if not path.is_file():
             continue
         try:
@@ -654,22 +902,78 @@ def list_library_items(owner_id: str | None = None) -> list[dict[str, Any]]:
         except Exception:
             info = {"duration": None}
         stat = path.stat()
-        job = jobs_by_filename.get(path.name)
+        job = next((candidate for (video_id, filename), candidate in jobs_by_filename.items() if filename == path.name), None)
+        if owner_id is not None and (job is None or not job.video_id):
+            continue
         if owner_id is not None and job is not None and job.video_id is not None:
             project_owner = project_owner_id(job.video_id)
-            if project_owner is not None and project_owner != owner_id:
+            if project_owner != owner_id:
                 continue
+        video_id = job.video_id if job is not None else None
+        artifact = None
+        if video_id:
+            metadata = load_project_metadata(video_id) or {}
+            artifact = next((item for item in _artifact_records(metadata) if item.get("filename") == path.name), None)
+        identity = artifact.get("artifact_id") if artifact else None
+        seen.add((identity or video_id, path.name))
         items.append(
             {
                 "filename": path.name,
-                "url": f"/media/shorts/{path.name}",
+                "url": f"/api/media/artifacts/{identity}" if identity else f"/media/shorts/{path.name}",
                 "size_bytes": stat.st_size,
                 "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
                 "duration": info.get("duration"),
                 "review_status": job.review_status if job is not None else "pending_review",
                 "render_job_id": job.id if job is not None else None,
+                "artifact_id": identity,
+                "project_id": video_id,
+                "kind": artifact.get("kind", "clip") if artifact else "clip",
             }
         )
+    if isinstance(storage, S3Storage):
+        for key in storage.list_keys("projects/"):
+            parts = key.split("/")
+            if len(parts) not in {4, 5} or parts[0] != "projects" or parts[2] != "renders":
+                continue
+            video_id = parts[1]
+            artifact_id = parts[3] if len(parts) == 5 else None
+            filename = parts[4] if len(parts) == 5 else parts[3]
+            if not filename.endswith(".mp4"):
+                continue
+            if (artifact_id or video_id, filename) in seen:
+                continue
+            if owner_id is not None and project_owner_id(video_id) != owner_id:
+                continue
+            metadata = load_project_metadata(video_id) or {}
+            artifact = next((item for item in _artifact_records(metadata) if item.get("artifact_id") == artifact_id), None)
+            job = next(
+                (
+                    candidate
+                    for candidate in job_registry.list()
+                    if candidate.kind in {"render", "compilation"}
+                    and candidate.video_id == video_id
+                    and candidate.output_path
+                    and Path(candidate.output_path).name == filename
+                    and (artifact_id is None or candidate.artifact_id == artifact_id)
+                ),
+                None,
+            )
+            size_bytes = storage.object_size(key) or 0
+            items.append(
+                {
+                    "filename": filename,
+                        "url": f"/api/media/artifacts/{artifact_id}" if artifact_id else f"/api/media/renders/{video_id}/{filename}",
+                    "size_bytes": size_bytes,
+                    "created_at": job.updated_at if job is not None else None,
+                    "duration": None,
+                    "review_status": job.review_status if job is not None else "pending_review",
+                    "render_job_id": job.id if job is not None else None,
+                        "artifact_id": artifact_id,
+                        "project_id": video_id,
+                        "kind": artifact.get("kind", "clip") if artifact else "clip",
+                    }
+            )
+            seen.add((artifact_id or video_id, filename))
     return items
 
 
@@ -677,10 +981,22 @@ def delete_library_item(filename: str, owner_id: str | None = None) -> None:
     path = safe_output_path(filename)
     if not path.exists():
         raise FileNotFoundError(filename)
+    matching_artifacts: list[str] = []
+    for metadata_path_value in PROJECT_CACHE_DIR.glob("*/metadata.json"):
+        video_id = metadata_path_value.parent.name
+        metadata = load_project_metadata(video_id) or {}
+        for artifact in _artifact_records(metadata):
+            if artifact.get("filename") == filename and (owner_id is None or artifact.get("owner_id") == owner_id):
+                matching_artifacts.append(str(artifact["artifact_id"]))
+    if len(matching_artifacts) > 1:
+        raise ValueError("Filename-only deletion is ambiguous; use the artifact ID.")
+    if matching_artifacts:
+        delete_artifact(matching_artifacts[0], owner_id or "")
+        return
     if owner_id is not None:
         for job in job_registry.list():
             if job.output_path and Path(job.output_path).name == filename and job.video_id:
                 project_owner = project_owner_id(job.video_id)
-                if project_owner is not None and project_owner != owner_id:
+                if project_owner != owner_id:
                     raise FileNotFoundError(filename)
     path.unlink()

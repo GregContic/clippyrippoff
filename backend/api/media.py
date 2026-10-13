@@ -5,8 +5,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from backend.services.project_service import load_project_metadata, output_owner_id
-from backend.services.storage import storage
+from backend.services.project_service import find_artifact, load_project_metadata, output_owner_id
+from backend.services.storage import StorageError, storage
 from scripts.utils import OUTPUT_SHORTS_DIR, PROCESSING_TEMP_DIR
 
 router = APIRouter(tags=["media"])
@@ -48,6 +48,30 @@ def get_render_media(video_id: str, filename: str):
     if not storage.exists(key):
         raise HTTPException(status_code=404, detail="Rendered media not found.")
     return StreamingResponse(storage.open_stream(key), media_type="video/mp4")
+
+
+@router.get("/api/media/artifacts/{artifact_id}")
+@router.get("/media/artifacts/{artifact_id}")
+def get_artifact_media(artifact_id: str, request: Request):
+    try:
+        artifact = find_artifact(artifact_id, request.state.user.id)
+    except StorageError as exc:
+        raise HTTPException(status_code=503, detail="Rendered media storage is temporarily unavailable.") from exc
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Rendered media not found.")
+    filename = artifact.get("filename")
+    if not isinstance(filename, str):
+        raise HTTPException(status_code=404, detail="Rendered media not found.")
+    try:
+        local = OUTPUT_SHORTS_DIR / _safe_name(filename)
+        if local.is_file():
+            return FileResponse(local, media_type="video/mp4")
+        key = artifact.get("storage_key")
+        if not isinstance(key, str) or not storage.exists(key):
+            raise HTTPException(status_code=404, detail="Rendered media not found.")
+        return StreamingResponse(storage.open_stream(key), media_type="video/mp4")
+    except StorageError as exc:
+        raise HTTPException(status_code=503, detail="Rendered media storage is temporarily unavailable.") from exc
 
 
 @router.get("/api/media/shorts/{filename}")

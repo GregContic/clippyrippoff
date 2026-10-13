@@ -227,6 +227,7 @@ def validate_clip_range(
     video_duration: float | None = None,
 ) -> None:
     """Validate a start/end clip range, raising ValidationError on any problem."""
+    comparison_tolerance = 1e-6
     if start < 0:
         raise ValidationError(f"Start timestamp ({start}s) cannot be negative.")
     if end <= start:
@@ -234,12 +235,12 @@ def validate_clip_range(
             f"End timestamp ({end}s) must be after start timestamp ({start}s)."
         )
     duration = end - start
-    if duration < min_seconds:
+    if duration + comparison_tolerance < min_seconds:
         raise ValidationError(
             f"Clip duration ({duration:.2f}s) is shorter than the configured minimum "
             f"({min_seconds}s)."
         )
-    if duration > max_seconds:
+    if duration - comparison_tolerance > max_seconds:
         raise ValidationError(
             f"Clip duration ({duration:.2f}s) exceeds the configured maximum "
             f"({max_seconds}s)."

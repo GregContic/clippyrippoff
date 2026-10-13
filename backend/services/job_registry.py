@@ -39,6 +39,8 @@ class JobRecord:
     updated_at: str = field(default_factory=_now)
     review_status: str = "pending_review"
     review_notes: str = ""
+    artifact_id: str | None = None
+    artifact_kind: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +61,8 @@ class JobRecord:
             "updated_at": self.updated_at,
             "review_status": self.review_status,
             "review_notes": self.review_notes,
+            "artifact_id": self.artifact_id,
+            "artifact_kind": self.artifact_kind,
         }
 
     @classmethod
@@ -81,6 +85,8 @@ class JobRecord:
             updated_at=str(payload.get("updated_at", _now())),
             review_status=str(payload.get("review_status", "pending_review")),
             review_notes=str(payload.get("review_notes", "")),
+            artifact_id=payload.get("artifact_id"),
+            artifact_kind=payload.get("artifact_kind"),
         )
 
 
@@ -157,6 +163,11 @@ class JobRegistry:
                 record = JobRecord.from_dict(payload)
             except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError):
                 continue
+            if record.status in {"queued", "running"}:
+                record.status = "interrupted"
+                record.stage = "interrupted"
+                record.message = "Interrupted by backend restart."
+                record.updated_at = _now()
             restored[record.id] = record
         with self._lock:
             self._jobs = restored
@@ -174,6 +185,8 @@ class JobRegistry:
         result: dict[str, Any] | None = None,
         retry_of: str | None = None,
         percent: float | None = None,
+        artifact_id: str | None = None,
+        artifact_kind: str | None = None,
     ) -> JobRecord:
         record = JobRecord(
             id=str(uuid.uuid4()),
@@ -185,6 +198,8 @@ class JobRegistry:
             result=result,
             retry_of=retry_of,
             percent=percent,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
         )
         return self._store(record)
 
@@ -215,6 +230,46 @@ class JobRegistry:
     def reset(self) -> None:
         with self._lock:
             self._jobs.clear()
+
+    def update_parent_from_children(self, parent_id: str, child_ids: list[str]) -> JobRecord | None:
+        with self._lock:
+            parent = self._jobs.get(parent_id)
+            children = [self._jobs.get(child_id) for child_id in child_ids]
+            children = [child for child in children if child is not None]
+            if parent is None or len(children) != len(child_ids):
+                return parent
+            if not children:
+                return parent
+            statuses = [child.status for child in children]
+            if all(status == "completed" for status in statuses):
+                status = "completed"
+                stage = "complete"
+                message = "Batch complete."
+            elif any(status in {"queued", "running"} for status in statuses):
+                status = "running" if any(item == "running" for item in statuses) else "queued"
+                stage = "rendering"
+                message = "Rendering batch clips."
+            elif any(status == "completed" for status in statuses):
+                status = "partially_completed"
+                stage = "complete"
+                message = "Batch completed with one or more failed clips."
+            else:
+                status = "failed"
+                stage = "failed"
+                message = "All batch clips failed."
+            percent_values = [float(child.percent or 0.0) for child in children]
+            percent = sum(percent_values) / len(percent_values)
+            if status == "completed":
+                percent = 100.0
+            parent.status = status
+            parent.stage = stage
+            parent.message = message
+            parent.percent = min(100.0, max(0.0, percent))
+            parent.updated_at = _now()
+            if status in {"completed", "partially_completed", "failed"}:
+                parent.result = {**(parent.result or {}), "completed_at": parent.updated_at}
+            self._write_record(parent)
+            return parent
 
     def submit(self, kind: str, runner: Callable[[str], None], **job_kwargs: Any) -> JobRecord:
         record = self.create(kind, **job_kwargs)
