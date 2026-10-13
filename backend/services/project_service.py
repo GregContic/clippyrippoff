@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
 import threading
 import uuid
@@ -637,129 +639,35 @@ def project_files(video_id: str) -> list[dict[str, Any]]:
     return files
 
 
-def find_project_by_url(url: str) -> dict[str, Any] | None:
+def youtube_project_id(url: str, owner_id: str | None) -> str:
     from youtube import extract_video_id
 
-    video_id = extract_video_id(url)
-    metadata = load_project_metadata(video_id)
-    if not metadata:
-        return None
-    return metadata
+    source_video_id = extract_video_id(url)
+    if owner_id is None:
+        return source_video_id
+    owner_digest = hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:16]
+    return f"yt-{source_video_id}-{owner_digest}"
 
 
-def _source_url(video_id: str) -> str | None:
-    source = source_path(video_id)
-    if source is None:
-        return None
-    return f"/media/cache/{video_id}/{source.name}"
-
-
-def _transcript_url(video_id: str) -> str | None:
-    path = transcript_path(video_id)
-    if not path.exists():
-        return None
-    return f"/media/cache/{video_id}/{path.name}"
-
-    jobs = _render_jobs_for_video(video_id)
-    return [job.to_dict() for job in jobs]
-
-
-def project_files(video_id: str) -> list[dict[str, Any]]:
-    files: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    jobs = _render_jobs_for_video(video_id)
-    job_lookup: dict[str, Any] = {}
-    for job in jobs:
-        output_name = None
-        if job.output_path:
-            output_name = Path(job.output_path).name
-        elif job.output_url:
-            output_name = Path(str(job.output_url)).name
-        if output_name:
-            job_lookup[output_name] = job
-
-    for job in jobs:
-        if job.status not in {"completed", "failed", "interrupted"}:
-            continue
-        output_name = None
-        if job.output_path:
-            output_name = Path(job.output_path).name
-        elif job.output_url:
-            output_name = Path(str(job.output_url)).name
-        if not output_name or output_name in seen:
-            continue
-        seen.add(output_name)
-        output_file = OUTPUT_SHORTS_DIR / output_name
-        stat = output_file.stat() if output_file.exists() else None
-        duration = None
-        request_signature = job.result.get("request_signature") if isinstance(job.result, dict) else None
-        if isinstance(request_signature, dict):
-            start = request_signature.get("start")
-            end = request_signature.get("end")
-            if isinstance(start, (int, float)) and isinstance(end, (int, float)):
-                duration = float(end) - float(start)
-        files.append(
-            {
-                "filename": output_name,
-                "url": f"/api/media/artifacts/{job.artifact_id}" if job.artifact_id else f"/media/shorts/{output_name}",
-                "size_bytes": stat.st_size if stat is not None else 0,
-                "created_at": job.updated_at,
-                "duration": duration,
-                "candidate_id": job.candidate_id,
-                "render_job_id": job.id,
-                "artifact_id": job.artifact_id,
-                "project_id": video_id,
-                "kind": job.artifact_kind or "clip",
-            }
-        )
-
-    metadata = load_project_metadata(video_id) or {}
-    for output_name in _rendered_outputs(metadata):
-        if output_name in seen:
-            continue
-        seen.add(output_name)
-        job = job_lookup.get(output_name)
-        output_file = OUTPUT_SHORTS_DIR / output_name
-        stat = output_file.stat() if output_file.exists() else None
-        duration = None
-        candidate_id = None
-        render_job_id = None
-        created_at = metadata.get("updated_at")
-        if job is not None:
-            candidate_id = job.candidate_id
-            render_job_id = job.id
-            created_at = job.updated_at
-            request_signature = job.result.get("request_signature") if isinstance(job.result, dict) else None
-            if isinstance(request_signature, dict):
-                start = request_signature.get("start")
-                end = request_signature.get("end")
-                if isinstance(start, (int, float)) and isinstance(end, (int, float)):
-                    duration = float(end) - float(start)
-        files.append(
-            {
-                "filename": output_name,
-                "url": f"/api/media/artifacts/{job.artifact_id}" if job is not None and job.artifact_id else f"/media/shorts/{output_name}",
-                "size_bytes": stat.st_size if stat is not None else 0,
-                "created_at": created_at,
-                "duration": duration,
-                "candidate_id": candidate_id,
-                "render_job_id": render_job_id,
-                "artifact_id": job.artifact_id if job is not None else None,
-                "project_id": video_id,
-                "kind": job.artifact_kind if job is not None and job.artifact_kind else "clip",
-            }
-        )
-    return files
-
-
-def find_project_by_url(url: str) -> dict[str, Any] | None:
+def find_project_by_url(url: str, owner_id: str | None = None) -> dict[str, Any] | None:
     from youtube import extract_video_id
 
-    video_id = extract_video_id(url)
-    metadata = load_project_metadata(video_id)
-    if not metadata:
+    source_video_id = extract_video_id(url)
+    scoped_video_id = youtube_project_id(url, owner_id)
+    scoped_metadata = load_project_metadata(scoped_video_id)
+    if scoped_metadata:
+        current_owner = scoped_metadata.get("owner_id")
+        if owner_id is None:
+            return scoped_metadata if current_owner in {None, ""} else None
+        return scoped_metadata if current_owner == owner_id else None
+
+    if owner_id is None:
         return None
-    return metadata
+
+    legacy_metadata = load_project_metadata(source_video_id)
+    if not legacy_metadata:
+        return None
+    return legacy_metadata if legacy_metadata.get("owner_id") == owner_id else None
 
 
 def _source_url(video_id: str) -> str | None:
@@ -786,6 +694,10 @@ def _candidates_url(video_id: str) -> str | None:
 def source_duration(video_id: str) -> float | None:
     source = source_path(video_id)
     if source is None:
+        metadata = load_project_metadata(video_id) or {}
+        duration = metadata.get("source_duration")
+        if isinstance(duration, (int, float)) and math.isfinite(float(duration)) and duration > 0:
+            return float(duration)
         return None
     try:
         info = get_media_info(source)
@@ -811,6 +723,9 @@ def project_summary(video_id: str) -> dict[str, Any] | None:
         if isinstance(candidates, dict):
             manual_trim_count = sum(1 for state in candidates.values() if isinstance(state, dict) and isinstance(state.get("trim"), dict))
     source_exists = source_path(video_id) is not None
+    source_key = metadata.get("source_storage_key")
+    if not source_exists and isinstance(source_key, str) and isinstance(storage, S3Storage):
+        source_exists = storage.exists(source_key)
     summary = {
         "video_id": video_id,
         "title": metadata.get("title"),
@@ -819,6 +734,9 @@ def project_summary(video_id: str) -> dict[str, Any] | None:
         "status": metadata.get("status", "unknown"),
         "analysis_stage": metadata.get("analysis_stage"),
         "message": metadata.get("message"),
+        "failure_code": metadata.get("failure_code"),
+        "retry_after": metadata.get("retry_after"),
+        "retry_after_seconds": metadata.get("retry_after_seconds"),
         "candidate_count": candidate_count,
         "rendered_count": int(metadata.get("rendered_count") or len(rendered_outputs)),
         "source_duration": source_duration(video_id),

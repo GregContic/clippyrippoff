@@ -195,10 +195,88 @@ variables supplied by the deployment or shell.
 
 If YouTube blocks extraction, the Analyze page also accepts direct video
 uploads (`.mp4`, `.mkv`, `.mov`, `.webm`, `.m4v`, or `.avi`). Set
-`MAX_UPLOAD_BYTES` to cap uploads (2 GiB by default). In deployments using
-`STORAGE_BACKEND=r2`, uploaded sources and generated analysis artifacts are
-stored in Cloudflare R2 rather than relying on Render's ephemeral filesystem.
-The temporary upload is removed after ingestion.
+`MAX_UPLOAD_BYTES` to cap uploads (20 GiB by default). In local development,
+uploads use the authenticated FastAPI multipart endpoint and are streamed to
+temporary disk. In production, the frontend disables video upload unless
+`STORAGE_BACKEND=r2` is enabled: the browser obtains a short-lived upload
+authorization from FastAPI and sends video bytes directly to the private R2
+bucket, bypassing Vercel and Render request-body limits. Large files use
+retryable multipart uploads. Successful uploads are size-verified in R2 and
+then start the existing analysis job; the worker downloads the source to
+temporary storage only for transcription and clip detection.
+
+Set these Render environment variables for R2 direct uploads:
+
+| Variable | Required/default | Purpose |
+| --- | --- | --- |
+| `STORAGE_BACKEND` | `r2` | Select the existing R2 storage adapter. |
+| `MAX_UPLOAD_BYTES` | `21474836480` (20 GiB) | Maximum authorized file size. |
+| `R2_ACCOUNT_ID` | Required | Cloudflare account identifier. |
+| `R2_BUCKET_NAME` | Required | Private R2 bucket name. |
+| `R2_ACCESS_KEY_ID` | Required | R2 S3-compatible access key ID. |
+| `R2_SECRET_ACCESS_KEY` | Required | R2 S3-compatible secret key. |
+| `R2_ENDPOINT_URL` | Required | `https://<account-id>.r2.cloudflarestorage.com`. |
+| `R2_MULTIPART_THRESHOLD_BYTES` | `104857600` (100 MiB) | At/above this size, use multipart upload. |
+| `R2_MULTIPART_PART_SIZE_BYTES` | `67108864` (64 MiB) | Multipart part size; must be 5 MiB–5 GiB. |
+| `R2_UPLOAD_URL_TTL_SECONDS` | `300` | Presigned URL lifetime; allowed range 60–3600 seconds. |
+| `R2_UPLOAD_SESSION_TTL_SECONDS` | `86400` (24 hours) | Incomplete upload session lifetime; allowed range 10 minutes–7 days and must exceed the URL lifetime by 60 seconds. |
+
+Keep the bucket private and configure its **CORS** policy to allow `PUT` from
+each exact frontend origin (for example, `https://<your-vercel-domain>` and
+`http://localhost:5173` for local development), allow the `Content-Type`
+request header, and expose the `ETag` response header. Multipart completion
+depends on the browser reading each part's ETag. Configure the bucket's
+multipart-upload lifecycle rule to abort incomplete multipart uploads after
+one day. The application also sweeps expired upload sessions/objects on
+startup and when a new upload is initialized.
+
+Deployment steps:
+
+1. Create a private R2 bucket and an R2 API token limited to that bucket's
+   object read/write permissions; set the R2 variables above on Render.
+2. Set `AUTH_ALLOWED_ORIGINS` to the exact deployed Vercel origin and retain
+   the existing secure-cookie, database, and durable auth settings.
+3. Add the matching bucket CORS rule (and incomplete-multipart lifecycle
+   rule), then deploy the backend and frontend. Existing Vercel `/api/*`
+   rewrites carry only small authenticated control requests; video bytes are
+   sent to R2, never retried through the backend if direct upload fails.
+4. In the deployed app, confirm the upload panel says files upload directly
+   to private R2 storage, upload a small and a multipart-sized test video,
+   then confirm project analysis and a rendered clip work.
+
+For local development, `STORAGE_BACKEND=local` continues to use the bounded
+FastAPI multipart path. The browser obtains the current maximum and accepted
+formats from the backend and reports progress, speed, and failures. To test
+the real direct-R2 path locally, configure the R2 values and add the local
+frontend origin to bucket CORS. R2 integration must be verified against an
+actual bucket; mocked tests do not verify credentials, CORS, or provider
+behavior.
+
+#### Manual R2 verification
+
+Use a non-production test account and a disposable source video after
+configuring an actual private bucket:
+
+1. Upload a small MP4. In browser developer tools, verify the authorization
+   calls go to the app and the `PUT` containing the video bytes goes to the
+   R2 S3 endpoint, with an `ETag` response header. Confirm progress reaches
+   100%, the project enters its queued/running state, and analysis completes.
+2. Upload a video larger than `R2_MULTIPART_THRESHOLD_BYTES`. Verify several
+   numbered R2 part requests, visible byte/speed progress, successful retry
+   after interrupting one failed part, and successful multipart completion.
+3. Start another multipart upload and cancel it. Confirm the multipart
+   upload no longer appears in the bucket's multipart-upload listing. For an
+   expired-session check, use a short test-only
+   `R2_UPLOAD_SESSION_TTL_SECONDS`, leave a transfer unfinished, restart the
+   backend or initialize another upload after expiry, and confirm its
+   pending object/session is removed.
+4. Try an unsupported extension and a file above `MAX_UPLOAD_BYTES`; both
+   must be rejected before a browser-to-R2 transfer begins. Temporarily
+   remove R2 write permission and confirm the app reports an authorization
+   or storage error without sending the video to FastAPI.
+5. Open the completed project, review candidates/transcript/captions, render
+   a clip, and confirm the source and generated output remain available from
+   the private bucket after a backend restart.
 
 Render must provide `DATABASE_URL`, `AUTH_SESSION_TTL_SECONDS`,
 `AUTH_COOKIE_NAME`, `AUTH_COOKIE_SECURE=true`, `AUTH_ALLOWED_ORIGINS` with the
@@ -398,6 +476,24 @@ transcript and candidate JSON, so repeated detection does not unnecessarily
 retranscribe the same source. Downloads are retained by default for caching,
 and only files created by this downloader are ever eligible for cleanup.
 
+All YouTube entry points use `scripts/youtube.py`: `POST /api/videos/analyze`,
+`scripts/detect_clips.py --url`, and `scripts/batch_process.py --url`. The
+downloader enables Node through `js_runtimes`, selects an MP4-compatible source
+up to 1080p, disables playlists, and uses a 20-second socket timeout. yt-dlp's
+internal request, fragment, extractor, and file-access retries are disabled so
+the application owns one predictable policy:
+
+- Transient network failures receive at most three total attempts. Delays are
+  exponential with bounded jitter: 1.0-1.5 seconds, then 2.0-2.5 seconds.
+- HTTP 429 stops immediately and applies a five-minute source cooldown.
+- A confirmed sign-in/bot challenge or terminal missing Visitor Data/GVS
+  PO-token error stops immediately and applies a 15-minute source cooldown.
+- Cooldown details are stored with the failed project/job metadata. API retries
+  during that window return HTTP 429 with `Retry-After`; a valid cached source
+  remains usable without contacting YouTube.
+- Concurrent extraction of the same video is rejected in-process, and queued
+  or running analysis metadata suppresses duplicate API submissions.
+
 The detector remains the same V2 pipeline after acquisition: transcript,
 audio, scene analysis, candidate generation, and explainable scoring.
 
@@ -469,7 +565,12 @@ file and FFmpeg. Verify those paths with a real authorized gameplay video.
   file or rerun with different settings.
 - **YouTube download failures** — confirm yt-dlp is installed, the video is
    public and normally accessible, and that you have permission to reuse it.
-   Retry with `--force-download` if a cached source is incomplete.
+   Reinstall `requirements.txt` after downloader updates so yt-dlp's EJS and
+   `curl_cffi` extras remain available, and rebuild/redeploy the Docker service
+   after dependency changes. Retry with `--force-download` if a cached source
+   is incomplete. HTTP 429, missing Visitor Data, and sign-in verification can
+   still be imposed by YouTube on a server IP; use the direct Upload video
+   workflow rather than supplying browser cookies, credentials, or tokens.
 
 ## What's outside V2 scope
 
@@ -486,12 +587,65 @@ Dockerfile installs FFmpeg and the Python dependencies, and starts Uvicorn on
 Render's `PORT`; leave the build and start commands unset. A native Python
 service cannot use `apt-get` to install FFmpeg.
 
-The container also includes Node.js 22 and installs `yt-dlp[default]` with its
-YouTube JavaScript challenge scripts. Rebuild and redeploy the Docker service
-after updating this configuration. This supplies yt-dlp's documented runtime
-requirements but does not guarantee that YouTube will permit downloads from
-Render's IP address; bot-verification failures are reported as failed analysis
-jobs rather than continuing to appear in progress.
+The container also includes Node.js 22 and installs
+`yt-dlp[default,curl-cffi]` with its YouTube JavaScript challenge scripts and
+the supported curl impersonation backend. Rebuild and redeploy the Docker
+service after updating this configuration. This supplies yt-dlp's documented
+runtime requirements but does not guarantee that YouTube will permit downloads
+from Render's IP address; bot-verification failures are reported as failed
+analysis jobs rather than continuing to appear in progress.
+
+### Optional PO-token provider assessment (not enabled)
+
+The official [yt-dlp PO Token Guide](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide)
+recommends a provider plugin when a selected YouTube client requires a
+Proof-of-Origin token. The featured
+[`bgutil-ytdlp-pot-provider`](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+can run an HTTP provider, but this repository does not install, configure, or
+start it. Enabling it would require an explicit deployment decision and all of
+the following:
+
+1. Deploy `brainicism/bgutil-ytdlp-pot-provider:<version>` as a separate Render
+   **Private Service** in the same workspace and region as the backend. Keep
+   port 4416 private; never expose it publicly. Render does not run Docker
+   Compose, so this cannot be an implicit sidecar in the existing web service.
+2. Set the provider health check to `GET /ping`. This endpoint returns provider
+   uptime and version; treating it as Render's health check is an architectural
+   recommendation based on the provider source, not a provider-documented
+   Render recipe.
+3. Add the matching `bgutil-ytdlp-pot-provider==<version>` Python plugin to the
+   backend image. The provider image and Python plugin must be upgraded
+   together and kept compatible with yt-dlp.
+4. Add an opt-in backend setting such as
+   `YOUTUBE_POT_PROVIDER_URL=http://<render-private-host>:4416`. The proposed
+   Python yt-dlp configuration would be:
+
+   ```python
+   "extractor_args": {
+       "youtubepot-bgutilhttp": {
+           "base_url": ["http://<render-private-host>:4416"],
+       },
+       "youtube": {"player_client": ["mweb"]},
+   }
+   ```
+
+   The equivalent documented CLI provider argument is
+   `--extractor-args "youtubepot-bgutilhttp:base_url=http://<host>:4416"`.
+   None of these settings are currently accepted or activated by the app.
+
+The HTTP provider has no documented API-key authentication. Its own
+documentation warns that exposing it beyond a trusted interface can permit
+untrusted token generation, resource exhaustion, and potentially remote code
+execution; Render's private network would therefore be the primary access
+control. Node 22 or Deno 2 is required by the provider, and its BotGuard logic
+is an ongoing maintenance dependency that can change as YouTube changes.
+
+A PO token does not guarantee successful extraction, does not bypass an
+IP-based “Sign in to confirm you're not a bot” restriction, and is especially
+unlikely to resolve every failure from a datacenter IP. Manual/fabricated
+Visitor Data, static PO tokens, browser cookies, proxy rotation, CAPTCHA
+automation, and account/session collection remain deliberately unsupported.
+Direct upload is the supported fallback for authorized media.
 
 The backend uses private storage by default. Set `STORAGE_BACKEND=local` (or
 leave it unset) for the existing filesystem workflow. For Render, set

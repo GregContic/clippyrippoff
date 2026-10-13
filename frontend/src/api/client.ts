@@ -15,6 +15,9 @@ import type {
   RenderResponse,
   TrimOverride,
   Settings,
+  UploadConfig,
+  UploadPart,
+  UploadStartResponse,
 } from './types';
 
 export const API_BASE_URL =
@@ -85,32 +88,257 @@ export function analyzeVideo(url: string, forceDownload = false): Promise<Analyz
   });
 }
 
-export function uploadVideo(file: File): Promise<AnalyzeResponse> {
+export type UploadSessionState = {
+  upload: UploadStartResponse;
+  completedParts: UploadPart[];
+};
+
+type UploadProgress = (uploadedBytes: number, totalBytes: number) => void;
+type UploadSessionChanged = (session: UploadSessionState) => void;
+
+export function getUploadConfig(): Promise<UploadConfig> {
+  return requestJson<UploadConfig>('/api/videos/upload/config');
+}
+
+function xhrUpload(
+  url: string,
+  body: XMLHttpRequestBodyInit,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  onProgress: (loaded: number) => void,
+): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const cleanup = () => signal.removeEventListener('abort', abort);
+    const abort = () => xhr.abort();
+    xhr.open('PUT', url);
+    Object.entries(headers).forEach(([name, value]) => xhr.setRequestHeader(name, value));
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded);
+    };
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error('Network error uploading to R2. Check the bucket CORS configuration and connection.'));
+    };
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException('Upload canceled.', 'AbortError'));
+    };
+    xhr.onload = () => {
+      cleanup();
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const message = xhr.status === 403
+          ? 'R2 rejected the upload (403). The URL may have expired, or the bucket credentials/permissions are insufficient; retry to get a fresh URL and check R2 access.'
+          : `R2 upload failed with status ${xhr.status}. Retry the upload.`;
+        reject(new Error(message));
+        return;
+      }
+      resolve(xhr.getResponseHeader('ETag'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) {
+      abort();
+      return;
+    }
+    xhr.send(body);
+  });
+}
+
+function csrfHeaders(): Record<string, string> {
+  const csrfToken = document.cookie.split('; ').find((item) => item.startsWith('clippy_csrf='))?.split('=').slice(1).join('=');
+  return csrfToken ? { 'X-CSRF-Token': decodeURIComponent(csrfToken) } : {};
+}
+
+function xhrMultipartUpload(file: File, signal: AbortSignal, onProgress: UploadProgress): Promise<AnalyzeResponse> {
   const form = new FormData();
   form.append('file', file);
-  const csrfToken = document.cookie.split('; ').find((item) => item.startsWith('clippy_csrf='))?.split('=').slice(1).join('=');
-  const headers: Record<string, string> = {};
-  if (csrfToken) {
-    headers['X-CSRF-Token'] = decodeURIComponent(csrfToken);
-  }
-  return fetch(`${API_BASE_URL}/api/videos/upload`, {
-    method: 'POST',
-    body: form,
-    credentials: 'include',
-    headers,
-  }).then(async (response) => {
-    const text = await response.text();
-    if (!response.ok) {
-      let message = text;
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const cleanup = () => signal.removeEventListener('abort', abort);
+    const abort = () => xhr.abort();
+    xhr.open('POST', `${API_BASE_URL}/api/videos/upload`);
+    xhr.withCredentials = true;
+    Object.entries(csrfHeaders()).forEach(([name, value]) => xhr.setRequestHeader(name, value));
+    xhr.upload.onprogress = (event) => onProgress(event.loaded, file.size);
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error('Network error sending the local-development upload.'));
+    };
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException('Upload canceled.', 'AbortError'));
+    };
+    xhr.onload = () => {
+      cleanup();
+      let payload: AnalyzeResponse | { detail?: string };
       try {
-        message = (JSON.parse(text) as { detail?: string }).detail ?? message;
+        payload = JSON.parse(xhr.responseText) as AnalyzeResponse | { detail?: string };
       } catch {
-        // Surface non-JSON server errors as-is.
+        reject(new Error(xhr.responseText || `Request failed with status ${xhr.status}`));
+        return;
       }
-      throw new Error(message || `Request failed with status ${response.status}`);
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error('detail' in payload ? payload.detail ?? `Request failed with status ${xhr.status}` : `Request failed with status ${xhr.status}`));
+        return;
+      }
+      resolve(payload as AnalyzeResponse);
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) {
+      abort();
+      return;
     }
-    return JSON.parse(text) as AnalyzeResponse;
+    xhr.send(form);
   });
+}
+
+export function cancelVideoUpload(uploadId: string): Promise<void> {
+  return requestJson<void>(`/api/videos/uploads/${encodeURIComponent(uploadId)}`, { method: 'DELETE' });
+}
+
+export async function uploadVideo(
+  file: File,
+  signal: AbortSignal,
+  onProgress: UploadProgress,
+  onSessionChanged: UploadSessionChanged,
+  resumed?: UploadSessionState,
+): Promise<AnalyzeResponse> {
+  const config = await getUploadConfig();
+  if (file.size > config.max_upload_bytes) {
+    throw new Error(`File exceeds the maximum supported size of ${formatUploadBytes(config.max_upload_bytes)}.`);
+  }
+  const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
+  if (!config.allowed_extensions.includes(extension)) {
+    throw new Error(`Unsupported video format. Accepted formats: ${config.allowed_extensions.join(', ')}.`);
+  }
+  if (!config.direct_upload) {
+    return xhrMultipartUpload(file, signal, onProgress);
+  }
+
+  let session = resumed;
+  try {
+    if (!session) {
+      const contentType = file.type || fallbackVideoContentType(extension);
+      const upload = await requestJson<UploadStartResponse>('/api/videos/uploads', {
+        method: 'POST',
+        body: JSON.stringify({ filename: file.name, size_bytes: file.size, content_type: contentType }),
+      });
+      session = { upload, completedParts: [] };
+      onSessionChanged(session);
+    }
+    if (!session) {
+      throw new Error('Upload session could not be created.');
+    }
+    const uploadSession = session;
+    if (signal.aborted) throw new DOMException('Upload canceled.', 'AbortError');
+
+    if (uploadSession.upload.upload_mode === 'put') {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          const url = attempt === 0 && uploadSession.upload.upload_url
+            ? uploadSession.upload.upload_url
+            : (await requestJson<{ url: string }>(`/api/videos/uploads/${uploadSession.upload.upload_id}/url`, { method: 'POST' })).url;
+          await xhrUpload(url, file, { 'Content-Type': file.type || fallbackVideoContentType(extension) }, signal, (loaded) => onProgress(loaded, file.size));
+          lastError = undefined;
+          break;
+        } catch (cause) {
+          lastError = cause;
+          if (signal.aborted || attempt === 3) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 300 * (attempt + 1)));
+        }
+      }
+      if (lastError) throw lastError;
+    } else {
+      const partSize = uploadSession.upload.part_size_bytes;
+      const totalParts = Math.ceil(file.size / partSize);
+      const completed = new Map(uploadSession.completedParts.map((part) => [part.part_number, part]));
+      const inFlight = new Map<number, number>();
+      const partLength = (number: number) => Math.min(partSize, file.size - (number - 1) * partSize);
+      const reportProgress = () => {
+        const transferred = [...completed.keys()].reduce((sum, number) => sum + partLength(number), 0)
+          + [...inFlight.values()].reduce((sum, amount) => sum + amount, 0);
+        onProgress(Math.min(file.size, transferred), file.size);
+      };
+      let nextPart = 1;
+      let failure: unknown;
+      const worker = async () => {
+        while (!signal.aborted && !failure) {
+          while (completed.has(nextPart) && nextPart <= totalParts) nextPart += 1;
+          if (nextPart > totalParts) return;
+          const partNumber = nextPart++;
+          const start = (partNumber - 1) * partSize;
+          const part = file.slice(start, Math.min(file.size, start + partSize));
+          for (let attempt = 0; attempt < 4 && !signal.aborted; attempt += 1) {
+            try {
+              const { url } = await requestJson<{ url: string }>(
+                `/api/videos/uploads/${uploadSession.upload.upload_id}/parts/${partNumber}/url`,
+                { method: 'POST' },
+              );
+              const etag = await xhrUpload(url, part, {}, signal, (loaded) => {
+                inFlight.set(partNumber, loaded);
+                reportProgress();
+              });
+              if (!etag) throw new Error('R2 did not return an ETag. Confirm the bucket exposes the ETag response header.');
+              completed.set(partNumber, { part_number: partNumber, etag });
+              inFlight.delete(partNumber);
+              session = {
+                upload: uploadSession.upload,
+                completedParts: [...completed.values()].sort((left, right) => left.part_number - right.part_number),
+              };
+              onSessionChanged(session);
+              reportProgress();
+              break;
+            } catch (cause) {
+              inFlight.delete(partNumber);
+              reportProgress();
+              if (signal.aborted || attempt === 3) {
+                failure = cause;
+                return;
+              }
+              await new Promise((resolve) => window.setTimeout(resolve, 300 * (attempt + 1)));
+            }
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, totalParts) }, () => worker()));
+      if (signal.aborted) throw new DOMException('Upload canceled.', 'AbortError');
+      if (failure) throw failure;
+    }
+
+    if (signal.aborted) throw new DOMException('Upload canceled.', 'AbortError');
+    onProgress(file.size, file.size);
+    return requestJson<AnalyzeResponse>(`/api/videos/uploads/${uploadSession.upload.upload_id}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({ parts: session.completedParts }),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === 'AbortError' && session) {
+      try {
+        await cancelVideoUpload(session.upload.upload_id);
+      } catch (cleanupError) {
+        throw new Error(`Upload canceled, but R2 cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : 'unknown error'}`);
+      }
+    }
+    throw cause;
+  }
+}
+
+function formatUploadBytes(bytes: number): string {
+  const gib = bytes / (1024 * 1024 * 1024);
+  return gib >= 1 ? `${gib.toFixed(1)} GiB` : `${Math.ceil(bytes / (1024 * 1024))} MiB`;
+}
+
+function fallbackVideoContentType(extension: string): string {
+  const types: Record<string, string> = {
+    '.avi': 'video/x-msvideo',
+    '.m4v': 'video/x-m4v',
+    '.mkv': 'video/x-matroska',
+    '.mov': 'video/quicktime',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+  };
+  return types[extension] ?? 'application/octet-stream';
 }
 
 export function listVideos(): Promise<{ items: ProjectSummary[] }> {

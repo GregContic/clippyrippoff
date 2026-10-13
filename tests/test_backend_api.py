@@ -2,23 +2,35 @@ import json
 import tempfile
 import time
 import unittest
-from threading import Event
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from threading import Event, Lock
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from backend.main import app
+import backend.api.videos as videos_api
 import backend.services.analysis_service as analysis_service
 import backend.services.compilation_service as compilation_service
+import backend.api.videos as videos_api
+import backend.services.direct_upload as direct_upload
 import backend.services.project_service as project_service
 import backend.services.render_service as render_service
 import backend.api.media as media_api
 import backend.services.batch_service as batch_service
 from backend.services.job_registry import job_registry
 from backend.services.auth import auth_repository
-from backend.services.storage import S3Storage, StorageError
-from scripts.youtube import BOT_CHALLENGE_MESSAGE, YouTubeBotChallengeError
+from backend.services.storage import S3Storage, StorageError, StorageSettings
+from scripts.youtube import (
+    BOT_CHALLENGE_MESSAGE,
+    RATE_LIMIT_MESSAGE,
+    YouTubeBotChallengeError,
+    YouTubeRateLimitError,
+    YouTubeUnavailableError,
+)
+from tests.test_direct_upload import _R2Client
 
 
 class TestBackendApi(unittest.TestCase):
@@ -42,6 +54,7 @@ class TestBackendApi(unittest.TestCase):
             patch.object(render_service, "PROCESSING_TEMP_DIR", self.root / "processing" / "temp"),
             patch.object(compilation_service, "OUTPUT_SHORTS_DIR", self.output_root),
             patch.object(compilation_service, "PROCESSING_TEMP_DIR", self.root / "processing" / "temp"),
+            patch.object(analysis_service, "_YOUTUBE_SOURCE_CACHE_DIR", self.root / "processing" / "temp" / "youtube_sources"),
             patch.object(job_registry, "storage_dir", self.root / "processing" / "temp" / "render_jobs"),
             patch.object(project_service, "get_media_info", return_value={"duration": 60.5}),
             patch.object(render_service, "get_media_info", return_value={"duration": 60.5}),
@@ -178,31 +191,346 @@ class TestBackendApi(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Invalid YouTube URL", response.json()["detail"])
 
+    def test_direct_upload_start_endpoint_returns_presigned_contract(self) -> None:
+        payload = {
+            "upload_id": "a" * 32,
+            "video_id": "upload-" + "b" * 32,
+            "upload_mode": "multipart",
+            "upload_url": None,
+            "part_size_bytes": 5 * 1024 * 1024,
+        }
+        with patch.object(videos_api, "start_upload", return_value=payload) as start:
+            response = self.client.post(
+                "/api/videos/uploads",
+                json={"filename": "clip.mp4", "size_bytes": 6 * 1024 * 1024, "content_type": "video/mp4"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), payload)
+        start.assert_called_once_with("clip.mp4", 6 * 1024 * 1024, "video/mp4", self.owner_id)
+
+    def test_direct_upload_endpoints_validate_input_and_isolate_ownership_errors(self) -> None:
+        malformed = self.client.post(
+            "/api/videos/uploads",
+            json={"filename": "clip.mp4", "size_bytes": 0, "content_type": "video/mp4"},
+        )
+        self.assertEqual(malformed.status_code, 422)
+
+        with patch.object(
+            videos_api,
+            "start_upload",
+            side_effect=videos_api.UploadServiceError(413, "Upload exceeds the 20 MB limit."),
+        ):
+            oversized = self.client.post(
+                "/api/videos/uploads",
+                json={"filename": "clip.mp4", "size_bytes": 21 * 1024 * 1024, "content_type": "video/mp4"},
+            )
+        self.assertEqual(oversized.status_code, 413)
+        self.assertIn("20 MB", oversized.json()["detail"])
+
+        with patch.object(
+            videos_api,
+            "single_upload_url",
+            side_effect=videos_api.UploadServiceError(404, "Upload session not found."),
+        ):
+            wrong_owner = self.client.post("/api/videos/uploads/" + "c" * 32 + "/url")
+        self.assertEqual(wrong_owner.status_code, 404)
+        self.assertEqual(wrong_owner.json()["detail"], "Upload session not found.")
+
+    def test_multipart_url_completion_and_cancel_endpoints_use_expected_contracts(self) -> None:
+        upload_id = "d" * 32
+        with patch.object(videos_api, "part_upload_url", return_value="https://r2.example/part") as part_url:
+            response = self.client.post(f"/api/videos/uploads/{upload_id}/parts/2/url")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"url": "https://r2.example/part"})
+
+        completion = {"video_id": "upload-" + "e" * 32, "status": "queued", "job_id": "job-upload"}
+        with patch.object(videos_api, "complete_upload", return_value=completion) as complete:
+            response = self.client.post(
+                f"/api/videos/uploads/{upload_id}/complete",
+                json={"parts": [{"part_number": 1, "etag": "etag-1"}, {"part_number": 2, "etag": "etag-2"}]},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["job_id"], "job-upload")
+        complete.assert_called_once_with(
+            upload_id,
+            self.owner_id,
+            [{"part_number": 1, "etag": "etag-1"}, {"part_number": 2, "etag": "etag-2"}],
+        )
+
+        with patch.object(videos_api, "cancel_upload") as cancel:
+            response = self.client.delete(f"/api/videos/uploads/{upload_id}")
+        self.assertEqual(response.status_code, 204)
+        cancel.assert_called_once_with(upload_id, self.owner_id)
+
+    def test_direct_upload_requires_authentication_and_is_owner_scoped(self) -> None:
+        backend = S3Storage(
+            StorageSettings("r2", self.root / "temp", "private", "endpoint", "access", "secret"),
+            client=_R2Client(),
+        )
+        with patch.object(direct_upload, "storage", backend), patch.object(videos_api, "storage", backend):
+            unauthenticated = TestClient(app).post(
+                "/api/videos/uploads",
+                json={"filename": "clip.mp4", "size_bytes": 8, "content_type": "video/mp4"},
+                headers={"Origin": "http://localhost:5173"},
+            )
+            self.assertEqual(unauthenticated.status_code, 401)
+
+            response = self.client.post(
+                "/api/videos/uploads",
+                json={"filename": "clip.mp4", "size_bytes": 8, "content_type": "video/mp4"},
+            )
+            self.assertEqual(response.status_code, 200)
+            upload_id = response.json()["upload_id"]
+
+            other_user = self._authenticated_client("other@example.com", "test-password-123")
+            denied = other_user.delete(f"/api/videos/uploads/{upload_id}")
+            self.assertEqual(denied.status_code, 404)
+
+            canceled = self.client.delete(f"/api/videos/uploads/{upload_id}")
+            self.assertEqual(canceled.status_code, 204)
+
     def test_bot_challenge_marks_analysis_job_and_project_failed(self) -> None:
+        fixed_now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
         with patch.object(
             analysis_service,
             "download_youtube_video",
             side_effect=YouTubeBotChallengeError(BOT_CHALLENGE_MESSAGE),
+        ), patch.object(
+            analysis_service,
+            "_utcnow",
+            return_value=fixed_now,
         ):
             response = self.client.post(
                 "/api/videos/analyze",
                 json={"url": "https://youtu.be/abc123XYZ_1"},
             )
             self.assertEqual(response.status_code, 200)
+            project_id = response.json()["video_id"]
             job_id = response.json()["job_id"]
             self._wait_for_job_completion(job_id)
+            retry_response = self.client.post(
+                "/api/videos/analyze",
+                json={"url": "https://youtu.be/abc123XYZ_1"},
+            )
 
-        job_response = self.client.get("/api/videos/abc123XYZ_1/job")
-        project_response = self.client.get("/api/videos/abc123XYZ_1")
+        job_response = self.client.get(f"/api/videos/{project_id}/job")
+        project_response = self.client.get(f"/api/videos/{project_id}")
         self.assertEqual(job_response.status_code, 200)
         self.assertEqual(job_response.json()["status"], "failed")
         self.assertEqual(job_response.json()["stage"], "failed")
-        self.assertEqual(job_response.json()["message"], BOT_CHALLENGE_MESSAGE)
-        self.assertEqual(job_response.json()["error"], BOT_CHALLENGE_MESSAGE)
+        self.assertIn(BOT_CHALLENGE_MESSAGE, job_response.json()["message"])
+        self.assertIn("Retry after", job_response.json()["error"])
+        self.assertEqual(
+            job_response.json()["result"]["failure_code"],
+            "youtube_bot_challenge",
+        )
+        self.assertEqual(
+            job_response.json()["result"]["retry_after"],
+            "2026-10-13T12:15:00+00:00",
+        )
         self.assertEqual(project_response.status_code, 200)
         self.assertEqual(project_response.json()["status"], "failed")
         self.assertEqual(project_response.json()["analysis_stage"], "failed")
-        self.assertEqual(project_response.json()["message"], BOT_CHALLENGE_MESSAGE)
+        self.assertIn(BOT_CHALLENGE_MESSAGE, project_response.json()["message"])
+        self.assertEqual(project_response.json()["failure_code"], "youtube_bot_challenge")
+        self.assertEqual(
+            project_response.json()["retry_after"],
+            "2026-10-13T12:15:00+00:00",
+        )
+        self.assertEqual(project_response.json()["retry_after_seconds"], 900)
+        self.assertEqual(retry_response.status_code, 429)
+        self.assertEqual(retry_response.headers["Retry-After"], "900")
+        self.assertIn("Upload video", retry_response.json()["detail"])
+        self.assertEqual(
+            len([job for job in job_registry.list() if job.kind == "analysis"]),
+            1,
+        )
+
+    def test_rate_limit_persists_retry_after_and_blocks_duplicate_job(self) -> None:
+        fixed_now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        with patch.object(
+            analysis_service,
+            "download_youtube_video",
+            side_effect=YouTubeRateLimitError(RATE_LIMIT_MESSAGE),
+        ), patch.object(
+            analysis_service,
+            "_utcnow",
+            return_value=fixed_now,
+        ):
+            response = self.client.post(
+                "/api/videos/analyze",
+                json={"url": "https://youtu.be/abc123XYZ_1"},
+            )
+            self.assertEqual(response.status_code, 200)
+            project_id = response.json()["video_id"]
+            self._wait_for_job_completion(response.json()["job_id"])
+            retry_response = self.client.post(
+                "/api/videos/analyze",
+                json={"url": "https://youtu.be/abc123XYZ_1"},
+            )
+
+        project_response = self.client.get(f"/api/videos/{project_id}")
+        self.assertEqual(project_response.json()["failure_code"], "youtube_rate_limited")
+        self.assertEqual(
+            project_response.json()["retry_after"],
+            "2026-10-13T12:05:00+00:00",
+        )
+        self.assertEqual(project_response.json()["retry_after_seconds"], 300)
+        self.assertEqual(retry_response.status_code, 429)
+        self.assertEqual(retry_response.headers["Retry-After"], "300")
+        self.assertEqual(
+            len([job for job in job_registry.list() if job.kind == "analysis"]),
+            1,
+        )
+
+    def test_completed_youtube_project_is_reused_only_by_its_owner(self) -> None:
+        url = "https://youtu.be/abc123XYZ_1"
+        owner_project_id = project_service.youtube_project_id(url, self.owner_id)
+        project_dir = self._create_project(owner_project_id)
+        metadata_path = project_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["url"] = url
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        other_client = self._authenticated_client("other@example.com", "test-password-123")
+
+        with patch.object(
+            analysis_service,
+            "download_youtube_video",
+            side_effect=YouTubeUnavailableError("Unavailable in test."),
+        ) as downloader:
+            owner_response = self.client.post("/api/videos/analyze", json={"url": url})
+            other_response = other_client.post("/api/videos/analyze", json={"url": url})
+            self._wait_for_job_completion(other_response.json()["job_id"])
+
+        self.assertEqual(owner_response.status_code, 200)
+        self.assertEqual(owner_response.json()["status"], "completed")
+        self.assertEqual(owner_response.json()["video_id"], owner_project_id)
+        self.assertEqual(other_response.status_code, 200)
+        self.assertEqual(other_response.json()["status"], "queued")
+        self.assertNotEqual(other_response.json()["video_id"], owner_project_id)
+        self.assertEqual(downloader.call_count, 1)
+        self.assertEqual(other_client.get(f"/api/videos/{owner_project_id}").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/videos/{other_response.json()['video_id']}").status_code, 404)
+
+    def test_youtube_cooldown_is_reused_only_by_its_owner(self) -> None:
+        url = "https://youtu.be/cooldnXYZ_1"
+        fixed_now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+        owner_project_id = project_service.youtube_project_id(url, self.owner_id)
+        project_dir = self._create_project(owner_project_id)
+        metadata_path = project_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata.update(
+            {
+                "url": url,
+                "status": "failed",
+                "analysis_stage": "failed",
+                "message": "Owner-only cooldown",
+                "failure_code": YouTubeRateLimitError.failure_code,
+                "retry_after": "2026-10-13T12:05:00+00:00",
+                "retry_after_seconds": 300,
+            }
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        other_client = self._authenticated_client("cooldown-other@example.com", "test-password-123")
+
+        with patch.object(analysis_service, "_utcnow", return_value=fixed_now), patch.object(
+            analysis_service,
+            "download_youtube_video",
+            side_effect=YouTubeUnavailableError("Unavailable in test."),
+        ):
+            owner_response = self.client.post("/api/videos/analyze", json={"url": url})
+            other_response = other_client.post("/api/videos/analyze", json={"url": url})
+            self._wait_for_job_completion(other_response.json()["job_id"])
+
+        self.assertEqual(owner_response.status_code, 429)
+        self.assertEqual(owner_response.headers["Retry-After"], "300")
+        self.assertEqual(other_response.status_code, 200)
+        self.assertEqual(other_response.json()["status"], "queued")
+        self.assertNotEqual(other_response.json()["video_id"], owner_project_id)
+        self.assertNotIn("Owner-only cooldown", other_response.text)
+        self.assertEqual(other_client.get(f"/api/videos/{owner_project_id}").status_code, 404)
+
+    def test_concurrent_users_get_distinct_active_youtube_projects(self) -> None:
+        url = "https://youtu.be/activeXYZ_1"
+        other_client = self._authenticated_client("active-other@example.com", "test-password-123")
+        downloads_started = Event()
+        release_downloads = Event()
+        counter_lock = Lock()
+        download_count = 0
+
+        def blocked_download(*args, **kwargs):
+            nonlocal download_count
+            with counter_lock:
+                download_count += 1
+                if download_count == 2:
+                    downloads_started.set()
+            release_downloads.wait(2)
+            raise YouTubeUnavailableError("Unavailable in test.")
+
+        try:
+            with patch.object(analysis_service, "download_youtube_video", side_effect=blocked_download):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    owner_future = executor.submit(self.client.post, "/api/videos/analyze", json={"url": url})
+                    other_future = executor.submit(other_client.post, "/api/videos/analyze", json={"url": url})
+                    owner_response = owner_future.result(timeout=2)
+                    other_response = other_future.result(timeout=2)
+                    self.assertTrue(downloads_started.wait(2))
+
+                self.assertEqual(owner_response.status_code, 200)
+                self.assertEqual(other_response.status_code, 200)
+                self.assertEqual(owner_response.json()["status"], "queued")
+                self.assertEqual(other_response.json()["status"], "queued")
+                self.assertNotEqual(owner_response.json()["video_id"], other_response.json()["video_id"])
+                self.assertNotEqual(owner_response.json()["job_id"], other_response.json()["job_id"])
+                self.assertEqual(other_client.get(f"/api/videos/{owner_response.json()['video_id']}").status_code, 404)
+                self.assertEqual(self.client.get(f"/api/videos/{other_response.json()['video_id']}").status_code, 404)
+        finally:
+            release_downloads.set()
+
+        self._wait_for_job_completion(owner_response.json()["job_id"])
+        self._wait_for_job_completion(other_response.json()["job_id"])
+
+    def test_unowned_legacy_youtube_project_is_not_reused(self) -> None:
+        url = "https://youtu.be/legacyXYZ_1"
+        legacy_dir = self._create_project("legacyXYZ_1")
+        metadata_path = legacy_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata.pop("owner_id", None)
+        metadata["url"] = url
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with patch.object(
+            analysis_service,
+            "download_youtube_video",
+            side_effect=YouTubeUnavailableError("Unavailable in test."),
+        ):
+            response = self.client.post("/api/videos/analyze", json={"url": url})
+            self._wait_for_job_completion(response.json()["job_id"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "queued")
+        self.assertNotEqual(response.json()["video_id"], "legacyXYZ_1")
+        self.assertEqual(
+            json.loads(metadata_path.read_text(encoding="utf-8")).get("owner_id"),
+            None,
+        )
+
+    def test_owned_legacy_youtube_project_remains_reusable_by_its_owner(self) -> None:
+        url = "https://youtu.be/ownedLegacy_1"
+        legacy_dir = self._create_project("ownedLegacy_1")
+        metadata_path = legacy_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["url"] = url
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with patch.object(analysis_service, "download_youtube_video") as downloader:
+            response = self.client.post("/api/videos/analyze", json={"url": url})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "completed")
+        self.assertEqual(response.json()["video_id"], "ownedLegacy_1")
+        downloader.assert_not_called()
 
     def test_candidate_retrieval_returns_cached_candidates(self) -> None:
         self._create_project()
@@ -302,6 +630,26 @@ class TestBackendApi(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["video_id"], "abc123XYZ_1")
         self.assertIsNone(payload["job_id"])
+
+    def test_duplicate_queued_analysis_request_is_rejected(self) -> None:
+        project_service.save_project_metadata(
+            "abc123XYZ_1",
+            {
+                "video_id": "abc123XYZ_1",
+                "url": "https://youtu.be/abc123XYZ_1",
+                "owner_id": self.owner_id,
+                "status": "queued",
+                "analysis_stage": "queued",
+                "message": "Queued",
+            },
+        )
+        duplicate = self.client.post(
+            "/api/videos/analyze",
+            json={"url": "https://youtu.be/abc123XYZ_1"},
+        )
+
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertFalse([job for job in job_registry.list() if job.kind == "analysis"])
 
     def test_manual_trim_save_does_not_change_candidate_json(self) -> None:
         self._create_project()

@@ -32,7 +32,7 @@ ALLOWED_EXTENSIONS = {
     ".mp4",
     ".webm",
 }
-DEFAULT_MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 
 
 def max_upload_bytes() -> int:
@@ -49,7 +49,12 @@ def validate_upload_name(filename: str | None) -> str:
     if not filename:
         raise IngestionError("Choose a video file to upload.")
     name = Path(filename).name
-    if name != filename or Path(name).suffix.casefold() not in ALLOWED_EXTENSIONS:
+    if (
+        name != filename
+        or "/" in filename
+        or "\\" in filename
+        or Path(name).suffix.casefold() not in ALLOWED_EXTENSIONS
+    ):
         raise IngestionError("Upload an MP4 or a video format supported by FFmpeg.")
     return name
 

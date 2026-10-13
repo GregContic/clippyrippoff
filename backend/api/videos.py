@@ -5,14 +5,48 @@ from uuid import uuid4
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
-from backend.schemas import AnalyzeRequest, AnalyzeResponse, ProjectEditorState, VideoListResponse, VideoSummary
+from backend.schemas import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    ProjectEditorState,
+    UploadCompleteRequest,
+    UploadConfigResponse,
+    UploadStartRequest,
+    UploadStartResponse,
+    VideoListResponse,
+    VideoSummary,
+)
 from backend.services.analysis_service import start_analysis, start_uploaded_analysis
+from backend.services.direct_upload import (
+    UploadServiceError,
+    cancel_upload,
+    complete_upload,
+    local_upload_configuration,
+    part_upload_url,
+    single_upload_url,
+    start_upload,
+    upload_configuration,
+)
 from backend.services.ingestion import IngestionError, save_uploaded_file, upload_temp_path
 from backend.services.job_registry import job_registry
 from backend.services.project_service import list_projects, load_editor_state, project_summary, save_editor_state
+from backend.services.storage import S3Storage, storage
+from scripts.youtube import YouTubeBotChallengeError, YouTubeRateLimitError
 from scripts.utils import PROCESSING_TEMP_DIR
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
+
+
+def _upload_error(exc: UploadServiceError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+def _cleanup_temporary_upload(destination: Path) -> None:
+    destination.unlink(missing_ok=True)
+    try:
+        destination.parent.rmdir()
+    except OSError:
+        pass
 
 
 @router.get("", response_model=VideoListResponse)
@@ -20,10 +54,80 @@ def get_videos(request: Request) -> VideoListResponse:
     return VideoListResponse(items=[VideoSummary(**item) for item in list_projects(owner_id=request.state.user.id)])
 
 
+@router.get("/upload/config", response_model=UploadConfigResponse)
+def get_upload_config() -> UploadConfigResponse:
+    try:
+        config = upload_configuration() if isinstance(storage, S3Storage) else local_upload_configuration()
+        return UploadConfigResponse(**config)
+    except (UploadServiceError, IngestionError) as exc:
+        if isinstance(exc, UploadServiceError):
+            raise _upload_error(exc) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/uploads", response_model=UploadStartResponse)
+def create_upload(request: UploadStartRequest, http_request: Request) -> UploadStartResponse:
+    try:
+        return UploadStartResponse(
+            **start_upload(
+                request.filename,
+                request.size_bytes,
+                request.content_type,
+                http_request.state.user.id,
+            )
+        )
+    except UploadServiceError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.post("/uploads/{upload_id}/url")
+def refresh_single_upload_url(upload_id: str, request: Request) -> dict[str, str]:
+    try:
+        return {"url": single_upload_url(upload_id, request.state.user.id)}
+    except UploadServiceError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.post("/uploads/{upload_id}/parts/{part_number}/url")
+def get_upload_part_url(upload_id: str, part_number: int, request: Request) -> dict[str, str]:
+    try:
+        return {"url": part_upload_url(upload_id, request.state.user.id, part_number)}
+    except UploadServiceError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.post("/uploads/{upload_id}/complete", response_model=AnalyzeResponse)
+def finish_upload(upload_id: str, body: UploadCompleteRequest, request: Request) -> AnalyzeResponse:
+    try:
+        result = complete_upload(
+            upload_id,
+            request.state.user.id,
+            [part.model_dump() for part in body.parts],
+        )
+        return AnalyzeResponse(**result)
+    except UploadServiceError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.delete("/uploads/{upload_id}", status_code=204)
+def remove_upload(upload_id: str, request: Request) -> None:
+    try:
+        cancel_upload(upload_id, request.state.user.id)
+    except UploadServiceError as exc:
+        raise _upload_error(exc) from exc
+
+
 @router.post("/analyze", response_model=AnalyzeResponse)
 def analyze_video(request: AnalyzeRequest, http_request: Request) -> AnalyzeResponse:
     try:
         return start_analysis(request.url, force_download=request.force_download, owner_id=http_request.state.user.id)
+    except (YouTubeRateLimitError, YouTubeBotChallengeError) as exc:
+        retry_after = max(1, int(exc.retry_after_seconds or 1))
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(retry_after)},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -52,9 +156,12 @@ def upload_video(http_request: Request, file: UploadFile = File(...)) -> Analyze
             owner_id=http_request.state.user.id,
         )
     except IngestionError as exc:
-        destination.unlink(missing_ok=True)
+        _cleanup_temporary_upload(destination)
         status = 413 if "limit" in str(exc).lower() else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except Exception:
+        _cleanup_temporary_upload(destination)
+        raise
 
 
 @router.get("/{video_id}", response_model=VideoSummary)

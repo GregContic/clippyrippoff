@@ -184,8 +184,42 @@ class AnalyzeResponse(BaseModel):
     title: str | None = None
     analysis_stage: str | None = None
     message: str | None = None
+    failure_code: str | None = None
+    retry_after: str | None = None
+    retry_after_seconds: int | None = None
     candidate_count: int = 0
     rendered_count: int = 0
+
+
+class UploadConfigResponse(BaseModel):
+    max_upload_bytes: int
+    multipart_threshold_bytes: int
+    part_size_bytes: int
+    allowed_extensions: list[str]
+    direct_upload: bool
+
+
+class UploadStartRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(gt=0, strict=True)
+    content_type: str = Field(min_length=1, max_length=128)
+
+
+class UploadStartResponse(BaseModel):
+    upload_id: str
+    video_id: str
+    upload_mode: Literal["put", "multipart"]
+    upload_url: str | None = None
+    part_size_bytes: int
+
+
+class UploadPartRequest(BaseModel):
+    part_number: int = Field(ge=1, le=10000)
+    etag: str = Field(min_length=1, max_length=256)
+
+
+class UploadCompleteRequest(BaseModel):
+    parts: list[UploadPartRequest] = Field(default_factory=list, max_length=10000)
 
 
 class RenderRequest(BaseModel):
@@ -390,6 +424,9 @@ class VideoSummary(BaseModel):
     status: str
     analysis_stage: str | None = None
     message: str | None = None
+    failure_code: str | None = None
+    retry_after: str | None = None
+    retry_after_seconds: int | None = None
     candidate_count: int = 0
     rendered_count: int = 0
     source_duration: float | None = None

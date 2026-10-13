@@ -5,8 +5,32 @@ export interface AnalyzeResponse {
   title?: string | null;
   analysis_stage?: string | null;
   message?: string | null;
+  failure_code?: string | null;
+  retry_after?: string | null;
+  retry_after_seconds?: number | null;
   candidate_count: number;
   rendered_count: number;
+}
+
+export interface UploadConfig {
+  max_upload_bytes: number;
+  multipart_threshold_bytes: number;
+  part_size_bytes: number;
+  allowed_extensions: string[];
+  direct_upload: boolean;
+}
+
+export interface UploadPart {
+  part_number: number;
+  etag: string;
+}
+
+export interface UploadStartResponse {
+  upload_id: string;
+  video_id: string;
+  upload_mode: 'put' | 'multipart';
+  upload_url?: string | null;
+  part_size_bytes: number;
 }
 
 export interface ProjectSummary {
@@ -17,6 +41,9 @@ export interface ProjectSummary {
   status: string;
   analysis_stage?: string | null;
   message?: string | null;
+  failure_code?: string | null;
+  retry_after?: string | null;
+  retry_after_seconds?: number | null;
   candidate_count: number;
   rendered_count: number;
   source_duration?: number | null;

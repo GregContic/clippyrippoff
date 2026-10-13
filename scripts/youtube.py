@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import random
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -19,14 +20,40 @@ from utils import PROCESSING_TEMP_DIR
 YOUTUBE_CACHE_DIR = PROCESSING_TEMP_DIR / "youtube"
 _VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,}$")
 _LOGGER = logging.getLogger(__name__)
+_DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
+_DOWNLOAD_LOCKS_GUARD = threading.Lock()
+_EXTRACTION_COOLDOWNS: dict[str, tuple[float, str]] = {}
+_EXTRACTION_COOLDOWNS_GUARD = threading.Lock()
+NETWORK_MAX_ATTEMPTS = 3
+NETWORK_RETRY_BASE_SECONDS = 1.0
+NETWORK_RETRY_CAP_SECONDS = 4.0
+NETWORK_RETRY_JITTER_SECONDS = 0.5
+YOUTUBE_SOCKET_TIMEOUT_SECONDS = 20
+RATE_LIMIT_COOLDOWN_SECONDS = 300
+BOT_CHALLENGE_COOLDOWN_SECONDS = 900
 BOT_CHALLENGE_MESSAGE = (
     "YouTube requires sign-in verification before this video can be downloaded. "
     "Analysis failed; try again later or use the Upload video option."
+)
+RATE_LIMIT_MESSAGE = (
+    "YouTube is rate-limiting this request. Wait before trying this source again, "
+    "or upload the video directly."
 )
 
 
 class YouTubeError(RuntimeError):
     """Raised for invalid URLs, unavailable videos, or download failures."""
+
+    failure_code = "youtube_error"
+    default_cooldown_seconds: int | None = None
+
+    def __init__(self, message: str, *, retry_after_seconds: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = (
+            retry_after_seconds
+            if retry_after_seconds is not None
+            else self.default_cooldown_seconds
+        )
 
 
 class InvalidYouTubeURLError(YouTubeError):
@@ -36,9 +63,15 @@ class InvalidYouTubeURLError(YouTubeError):
 class YouTubeBotChallengeError(YouTubeError):
     """Raised when YouTube blocks extraction with a bot-verification challenge."""
 
+    failure_code = "youtube_bot_challenge"
+    default_cooldown_seconds = BOT_CHALLENGE_COOLDOWN_SECONDS
+
 
 class YouTubeRateLimitError(YouTubeError):
     """Raised when YouTube rate-limits extraction."""
+
+    failure_code = "youtube_rate_limited"
+    default_cooldown_seconds = RATE_LIMIT_COOLDOWN_SECONDS
 
 
 class YouTubeUnavailableError(YouTubeError):
@@ -56,7 +89,8 @@ class YouTubeStorageError(YouTubeError):
 def _safe_diagnostic(message: str) -> str:
     message = re.sub(r"(https?://[^\s?#]+)\?[^\s#]*", r"\1?[REDACTED]", message)
     message = re.sub(
-        r"(?i)\b(cookie|authorization|token|password|api[_-]?key)\b\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
+        r"(?i)\b(cookie|authorization|token|po(?:[_ -]?token)|visitor(?:[_ -]?data)|password|api[_-]?key)\b"
+        r"\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
         r"\1=[REDACTED]",
         message,
     )
@@ -122,17 +156,37 @@ def _load_yt_dlp():
 
 def _classify_extraction_error(exc: Exception) -> YouTubeError:
     message = str(exc).casefold()
-    if "sign in to confirm" in message and "not a bot" in message:
+    if (
+        ("sign in to confirm" in message and "not a bot" in message)
+        or "missing required visitor data" in message
+        or "unable to fetch gvs po token" in message
+    ):
         return YouTubeBotChallengeError(BOT_CHALLENGE_MESSAGE)
     if any(marker in message for marker in ("http error 429", "too many requests", "rate limit")):
-        return YouTubeRateLimitError(
-            "YouTube is rate-limiting this request. Wait a few minutes and try again, or upload the video directly."
-        )
+        return YouTubeRateLimitError(RATE_LIMIT_MESSAGE)
     if any(marker in message for marker in ("private video", "video unavailable", "members-only", "copyright owner")):
         return YouTubeUnavailableError(
             "This YouTube video is private, unavailable, or restricted. Check access or upload an authorized copy."
         )
-    if any(marker in message for marker in ("timed out", "timeout", "temporary failure", "connection reset", "connection aborted", "name or service not known")):
+    if any(
+        marker in message
+        for marker in (
+            "timed out",
+            "timeout",
+            "temporary failure",
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "network is unreachable",
+            "remote end closed connection",
+            "remote disconnected",
+            "name or service not known",
+            "http error 500",
+            "http error 502",
+            "http error 503",
+            "http error 504",
+        )
+    ):
         return YouTubeNetworkError(
             "The YouTube request timed out or failed temporarily. Check the connection and try again."
         )
@@ -141,12 +195,62 @@ def _classify_extraction_error(exc: Exception) -> YouTubeError:
     )
 
 
+def _lock_for_video(video_id: str) -> threading.Lock:
+    with _DOWNLOAD_LOCKS_GUARD:
+        return _DOWNLOAD_LOCKS.setdefault(video_id, threading.Lock())
+
+
+def _cooldown_state(video_id: str) -> tuple[float, str] | None:
+    with _EXTRACTION_COOLDOWNS_GUARD:
+        state = _EXTRACTION_COOLDOWNS.get(video_id)
+    if state is None:
+        return None
+    expires, failure_code = state
+    if time.monotonic() >= expires:
+        with _EXTRACTION_COOLDOWNS_GUARD:
+            _EXTRACTION_COOLDOWNS.pop(video_id, None)
+        return None
+    return expires, failure_code
+
+
+def _enforce_cooldown(video_id: str) -> None:
+    state = _cooldown_state(video_id)
+    if state is None:
+        return
+    expires, failure_code = state
+    remaining = max(1, int(expires - time.monotonic()))
+    if failure_code == YouTubeBotChallengeError.failure_code:
+        raise YouTubeBotChallengeError(
+            f"{BOT_CHALLENGE_MESSAGE} Retry after the {remaining}-second cooldown.",
+            retry_after_seconds=remaining,
+        )
+    raise YouTubeRateLimitError(
+        f"YouTube is rate-limiting this source. Retry after {remaining} seconds or upload the video directly.",
+        retry_after_seconds=remaining,
+    )
+
+
+def _remember_cooldown(video_id: str, error: YouTubeError) -> None:
+    seconds = error.retry_after_seconds
+    if seconds is None:
+        return
+    with _EXTRACTION_COOLDOWNS_GUARD:
+        _EXTRACTION_COOLDOWNS[video_id] = (
+            time.monotonic() + seconds,
+            error.failure_code,
+        )
+
+
 def _is_retryable(exc: Exception) -> bool:
-    return isinstance(exc, (YouTubeRateLimitError, YouTubeNetworkError))
+    return isinstance(exc, YouTubeNetworkError)
 
 
 def _retry_delay(attempt: int) -> float:
-    return min(8.0, 1.0 * (2 ** attempt)) + random.uniform(0.0, 0.5)
+    exponential = min(
+        NETWORK_RETRY_CAP_SECONDS,
+        NETWORK_RETRY_BASE_SECONDS * (2 ** attempt),
+    )
+    return exponential + random.uniform(0.0, NETWORK_RETRY_JITTER_SECONDS)
 
 
 def download_youtube_video(
@@ -179,57 +283,73 @@ def download_youtube_video(
             "cached": True,
         }
 
-    yt_dlp = _load_yt_dlp()
-    output_template = str(cache_dir / "source.%(ext)s")
-    options = {
-        "format": "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "merge_output_format": "mp4",
-        "outtmpl": output_template,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "js_runtimes": {"node": {}},
-        "logger": _YouTubeDLLogger(),
-        "progress_hooks": [_progress_hook],
-    }
-    info: dict[str, Any] | None = None
-    for attempt in range(2):
-        try:
-            with yt_dlp.YoutubeDL(options) as downloader:
-                info = downloader.extract_info(url, download=True)
-            break
-        except Exception as exc:
-            classified = _classify_extraction_error(exc)
-            _LOGGER.warning(
-                "YouTube extraction failed for video %s (attempt %d, %s): %s",
-                video_id,
-                attempt + 1,
-                type(classified).__name__,
-                _safe_diagnostic(str(exc)),
-            )
-            if not _is_retryable(classified) or attempt == 1:
-                raise classified from None
-            time.sleep(_retry_delay(attempt))
-
-    source = _cached_source(cache_dir)
-    if source is None:
-        raise YouTubeStorageError("Download completed but no readable source video was created.")
-    title = str((info or {}).get("title") or video_id)
+    _enforce_cooldown(video_id)
+    lock = _lock_for_video(video_id)
+    if not lock.acquire(blocking=False):
+        raise YouTubeError("This YouTube source is already being downloaded. Please wait a moment and try again.")
     try:
-        import json
-        metadata_path.write_text(
-            json.dumps({"url": url, "video_id": video_id, "title": title}, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        raise YouTubeError(f"Downloaded video, but could not save cache metadata: {exc}") from exc
-    return {
-        "url": url,
-        "video_id": video_id,
-        "title": title,
-        "filepath": str(source),
-        "cached": False,
-    }
+        _enforce_cooldown(video_id)
+        yt_dlp = _load_yt_dlp()
+        output_template = str(cache_dir / "source.%(ext)s")
+        options = {
+            "format": "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "merge_output_format": "mp4",
+            "outtmpl": output_template,
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "js_runtimes": {"node": {}},
+            "socket_timeout": YOUTUBE_SOCKET_TIMEOUT_SECONDS,
+            "retries": 0,
+            "fragment_retries": 0,
+            "extractor_retries": 0,
+            "file_access_retries": 0,
+            "logger": _YouTubeDLLogger(),
+            "progress_hooks": [_progress_hook],
+        }
+        info: dict[str, Any] | None = None
+        for attempt in range(NETWORK_MAX_ATTEMPTS):
+            try:
+                with yt_dlp.YoutubeDL(options) as downloader:
+                    info = downloader.extract_info(url, download=True)
+                break
+            except Exception as exc:
+                classified = _classify_extraction_error(exc)
+                _LOGGER.warning(
+                    "YouTube extraction failed for video %s (attempt %d, %s): %s",
+                    video_id,
+                    attempt + 1,
+                    type(classified).__name__,
+                    _safe_diagnostic(str(exc)),
+                )
+                if isinstance(classified, (YouTubeBotChallengeError, YouTubeRateLimitError)):
+                    _remember_cooldown(video_id, classified)
+                    raise classified from None
+                if not _is_retryable(classified) or attempt == NETWORK_MAX_ATTEMPTS - 1:
+                    raise classified from None
+                time.sleep(_retry_delay(attempt))
+
+        source = _cached_source(cache_dir)
+        if source is None:
+            raise YouTubeStorageError("Download completed but no readable source video was created.")
+        title = str((info or {}).get("title") or video_id)
+        try:
+            import json
+            metadata_path.write_text(
+                json.dumps({"url": url, "video_id": video_id, "title": title}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise YouTubeError(f"Downloaded video, but could not save cache metadata: {exc}") from exc
+        return {
+            "url": url,
+            "video_id": video_id,
+            "title": title,
+            "filepath": str(source),
+            "cached": False,
+        }
+    finally:
+        lock.release()
 
 
 def _progress_hook(status: dict[str, Any]) -> None:

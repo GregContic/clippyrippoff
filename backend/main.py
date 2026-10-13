@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -19,8 +21,11 @@ from backend.api.settings import router as settings_router
 from backend.api.videos import router as videos_router
 from backend.services.job_registry import job_registry
 from backend.services.auth import allowed_origins, csrf_protect, enforce_project_ownership, get_current_user, validate_configuration
+from backend.services.direct_upload import UploadServiceError, cleanup_expired_uploads
+from backend.services.storage import S3Storage, storage
 from scripts.utils import ensure_directories
 
+_LOGGER = logging.getLogger(__name__)
 app = FastAPI(title="ClippyRipoff API", version="1.0.0")
 validate_configuration()
 
@@ -61,6 +66,11 @@ app.include_router(auth_router)
 def _startup() -> None:
     ensure_directories()
     job_registry.restore_from_disk()
+    if isinstance(storage, S3Storage):
+        try:
+            cleanup_expired_uploads()
+        except UploadServiceError:
+            _LOGGER.exception("Unable to clean up expired R2 upload sessions during startup.")
 
 
 @app.get("/api/health")

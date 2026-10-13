@@ -151,7 +151,15 @@ def submit_renders(
     metadata = load_project_metadata(video_id) or {}
     source_path = Path(metadata.get("source_path") or "")
     if not source_path.exists():
-        raise FileNotFoundError("Cached source video is missing.")
+        source_key = metadata.get("source_storage_key")
+        if not isinstance(source_key, str) or not source_key:
+            raise FileNotFoundError("Cached source video is missing.")
+        source_path = PROCESSING_TEMP_DIR / "youtube" / video_id / Path(source_key).name
+        storage.download_file(source_key, source_path)
+        if not source_path.is_file() or source_path.stat().st_size == 0:
+            raise FileNotFoundError("Cached source video could not be restored from durable storage.")
+        metadata["source_path"] = str(source_path)
+        save_project_metadata(video_id, metadata)
 
     try:
         source_info = get_media_info(source_path)

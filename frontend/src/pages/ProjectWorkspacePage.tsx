@@ -116,6 +116,17 @@ export function ProjectWorkspacePage() {
         return;
       }
     });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoId]);
+
+  useEffect(() => {
+    if (!project || !['queued', 'running'].includes(project.status)) {
+      return undefined;
+    }
+    let active = true;
     const interval = window.setInterval(() => {
       if (active) {
         void loadWorkspace();
@@ -126,7 +137,7 @@ export function ProjectWorkspacePage() {
       window.clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoId]);
+  }, [videoId, project?.status]);
 
   useEffect(() => {
     let active = true;
@@ -415,6 +426,7 @@ export function ProjectWorkspacePage() {
     try {
       const response = await analyzeVideo(project.url, forceDownload);
       navigate(`/projects/${response.video_id}`);
+      await loadWorkspace();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to start analysis.');
     } finally {

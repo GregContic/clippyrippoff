@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import shutil
 import threading
+from datetime import datetime, timedelta, timezone
+from math import ceil
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,6 +19,7 @@ from backend.services.project_service import (
     project_summary,
     save_candidates,
     save_project_metadata,
+    youtube_project_id,
 )
 from scripts.detect_clips import detect_candidates
 from scripts.youtube import (
@@ -29,12 +33,65 @@ from scripts.youtube import (
     download_youtube_video,
     extract_video_id,
 )
-from scripts.utils import FFmpegNotFoundError, TranscriptionError, load_config
+from scripts.utils import FFmpegNotFoundError, PROCESSING_TEMP_DIR, TranscriptionError, get_media_info, load_config
 from backend.services.storage import storage
 from backend.services.storage import StorageError
 from backend.services.ingestion import YouTubeProvider
 
 _LOGGER = logging.getLogger(__name__)
+_ANALYSIS_START_LOCK = threading.Lock()
+_YOUTUBE_SOURCE_CACHE_DIR = PROCESSING_TEMP_DIR / "youtube_sources"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _active_cooldown_error(metadata: dict[str, Any]) -> YouTubeError | None:
+    retry_after_raw = metadata.get("retry_after")
+    failure_code = metadata.get("failure_code")
+    if not isinstance(retry_after_raw, str) or failure_code not in {
+        YouTubeRateLimitError.failure_code,
+        YouTubeBotChallengeError.failure_code,
+    }:
+        return None
+    try:
+        retry_after = datetime.fromisoformat(retry_after_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if retry_after.tzinfo is None:
+        retry_after = retry_after.replace(tzinfo=timezone.utc)
+    remaining = ceil((retry_after - _utcnow()).total_seconds())
+    if remaining <= 0:
+        return None
+    if failure_code == YouTubeBotChallengeError.failure_code:
+        return YouTubeBotChallengeError(
+            f"{BOT_CHALLENGE_MESSAGE} Retry after {retry_after.isoformat()}.",
+            retry_after_seconds=remaining,
+        )
+    return YouTubeRateLimitError(
+        f"YouTube is rate-limiting this source. Retry after {retry_after.isoformat()} "
+        "or upload the video directly.",
+        retry_after_seconds=remaining,
+    )
+
+
+def _failure_metadata(exc: Exception, message: str) -> dict[str, Any]:
+    failure_code = getattr(exc, "failure_code", type(exc).__name__)
+    result: dict[str, Any] = {
+        "failure_code": failure_code,
+        "retry_after": None,
+        "retry_after_seconds": None,
+        "message": message,
+    }
+    retry_after_seconds = getattr(exc, "retry_after_seconds", None)
+    if not isinstance(retry_after_seconds, int) or retry_after_seconds <= 0:
+        return result
+    retry_after = _utcnow() + timedelta(seconds=retry_after_seconds)
+    result["retry_after"] = retry_after.isoformat()
+    result["retry_after_seconds"] = retry_after_seconds
+    result["message"] = f"{message} Retry after {retry_after.isoformat()}."
+    return result
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -76,11 +133,43 @@ def _start_source_analysis(
     source_loader: Callable[[], dict[str, Any]],
     existing: dict[str, Any] | None = None,
     reuse_completed: bool = True,
+    source_storage_key: str | None = None,
 ) -> AnalyzeResponse:
     if existing:
         status = str(existing.get("status", "unknown"))
-        if status == "running":
+        same_stored_upload = (
+            source_storage_key
+            and existing.get("source_storage_key") == source_storage_key
+            and existing.get("owner_id") == owner_id
+        )
+        if status in {"queued", "running"}:
+            if same_stored_upload:
+                return AnalyzeResponse(
+                    video_id=video_id,
+                    status=status,
+                    job_id=existing.get("analysis_job_id"),
+                    title=existing.get("title"),
+                    analysis_stage=existing.get("analysis_stage"),
+                    message=existing.get("message"),
+                    candidate_count=int(existing.get("candidate_count", 0)),
+                    rendered_count=int(existing.get("rendered_count", 0)),
+                )
             raise RuntimeError("This video is already being analyzed.")
+        if status == "completed" and same_stored_upload:
+            summary = project_summary(video_id) or {}
+            return AnalyzeResponse(
+                video_id=video_id,
+                status="completed",
+                job_id=existing.get("analysis_job_id"),
+                title=summary.get("title"),
+                analysis_stage=summary.get("analysis_stage"),
+                message=summary.get("message"),
+                candidate_count=int(summary.get("candidate_count", 0)),
+                rendered_count=int(summary.get("rendered_count", 0)),
+            )
+        cooldown_error = _active_cooldown_error(existing)
+        if cooldown_error is not None:
+            raise cooldown_error
         if status == "completed" and reuse_completed and project_summary(video_id):
             summary = project_summary(video_id) or {}
             return AnalyzeResponse(
@@ -100,9 +189,7 @@ def _start_source_analysis(
         message="Queued",
     )
 
-    save_project_metadata(
-        video_id,
-        {
+    queued_metadata = {
             "video_id": video_id,
             "url": url,
             "title": title or (existing.get("title") if existing else None),
@@ -113,8 +200,10 @@ def _start_source_analysis(
             "candidate_count": int(existing.get("candidate_count", 0)) if existing else 0,
             "rendered_count": int(existing.get("rendered_count", 0)) if existing else 0,
             "analysis_job_id": record.id,
-        },
-    )
+        }
+    if source_storage_key is not None:
+        queued_metadata["source_storage_key"] = source_storage_key
+    save_project_metadata(video_id, queued_metadata)
 
     def _runner(job_id: str) -> None:
         try:
@@ -122,11 +211,18 @@ def _start_source_analysis(
             stage = "downloading" if url else "uploading"
             job_registry.update(job_id, stage=stage, message="Downloading" if url else "Uploading")
             downloaded = source_loader()
-            video_id_local = downloaded["video_id"]
+            video_id_local = video_id
             paths = cache_paths(video_id_local)
             source_path = Path(downloaded["filepath"])
-            source_key = f"projects/{video_id_local}/source/{source_path.name}"
-            storage.upload_file(source_path, source_key, mimetypes.guess_type(source_path.name)[0] or "video/mp4")
+            if source_storage_key is None:
+                cached_source = paths["directory"] / f"source{source_path.suffix.casefold()}"
+                cached_source.parent.mkdir(parents=True, exist_ok=True)
+                if source_path.resolve() != cached_source.resolve():
+                    shutil.copyfile(source_path, cached_source)
+                source_path = cached_source
+            source_key = source_storage_key or f"projects/{video_id_local}/source/{source_path.name}"
+            if source_storage_key is None:
+                storage.upload_file(source_path, source_key, mimetypes.guess_type(source_path.name)[0] or "video/mp4")
             metadata = _project_payload(video_id_local, url, downloaded.get("title"), source_path)
             metadata["owner_id"] = owner_id
             metadata["source_storage_key"] = source_key
@@ -138,6 +234,13 @@ def _start_source_analysis(
                     "analysis_job_id": job_id,
                 }
             )
+            try:
+                duration = get_media_info(source_path).get("duration")
+            except (OSError, RuntimeError, ValueError) as exc:
+                _LOGGER.warning("Unable to inspect source duration for video %s: %s", video_id_local, exc)
+            else:
+                if isinstance(duration, (int, float)) and duration > 0:
+                    metadata["source_duration"] = float(duration)
             save_project_metadata(video_id_local, metadata)
 
             config = load_config()
@@ -178,9 +281,14 @@ def _start_source_analysis(
             )
             save_project_metadata(video_id_local, metadata)
             summary = project_summary(video_id_local) or {}
+            if downloaded.get("temporary") and source_storage_key is not None:
+                Path(str(downloaded["filepath"])).unlink(missing_ok=True)
+                downloaded["temporary"] = False
             job_registry.update(job_id, status="completed", stage="complete", message="Complete", result=summary)
         except Exception as exc:
             error_message = _friendly_error(exc)
+            failure = _failure_metadata(exc, error_message)
+            error_message = str(failure["message"])
             _LOGGER.error(
                 "Analysis job %s failed for video %s (%s): %s",
                 job_id,
@@ -194,6 +302,9 @@ def _start_source_analysis(
                 analysis_stage="failed",
                 message=error_message,
                 analysis_job_id=job_id,
+                failure_code=failure["failure_code"],
+                retry_after=failure["retry_after"],
+                retry_after_seconds=failure["retry_after_seconds"],
             )
             job_registry.update(
                 job_id,
@@ -201,6 +312,7 @@ def _start_source_analysis(
                 stage="failed",
                 message=error_message,
                 error=error_message,
+                result=failure,
             )
         finally:
             if isinstance(locals().get("downloaded"), dict) and downloaded.get("temporary"):
@@ -224,16 +336,36 @@ def _start_source_analysis(
 
 
 def start_analysis(url: str, *, force_download: bool = False, owner_id: str | None = None) -> AnalyzeResponse:
-    video_id = extract_video_id(url)
-    return _start_source_analysis(
-        video_id,
-        url=url,
-        title=None,
-        owner_id=owner_id,
-        existing=find_project_by_url(url),
-        source_loader=lambda: YouTubeProvider(url, force_download, download_youtube_video).ingest().__dict__,
-        reuse_completed=not force_download,
-    )
+    source_video_id = extract_video_id(url)
+    with _ANALYSIS_START_LOCK:
+        existing = find_project_by_url(url, owner_id=owner_id)
+        video_id = str(existing.get("video_id") or source_video_id) if existing else youtube_project_id(url, owner_id)
+
+        scoped_metadata = load_project_metadata(video_id)
+        if scoped_metadata is not None and existing is None:
+            raise RuntimeError("Project not found.")
+
+        def load_youtube_source() -> dict[str, Any]:
+            provider = YouTubeProvider(
+                url,
+                force_download,
+                lambda source_url, *, force_download=False: download_youtube_video(
+                    source_url,
+                    output_dir=_YOUTUBE_SOURCE_CACHE_DIR,
+                    force_download=force_download,
+                ),
+            )
+            return provider.ingest().__dict__
+
+        return _start_source_analysis(
+            video_id,
+            url=url,
+            title=None,
+            owner_id=owner_id,
+            existing=existing,
+            source_loader=load_youtube_source,
+            reuse_completed=not force_download,
+        )
 
 
 def start_uploaded_analysis(
@@ -255,4 +387,50 @@ def start_uploaded_analysis(
             "cached": False,
             "temporary": True,
         },
+    )
+
+
+def start_stored_upload_analysis(
+    video_id: str,
+    source_storage_key: str,
+    *,
+    filename: str,
+    owner_id: str,
+    size_bytes: int,
+) -> AnalyzeResponse:
+    from backend.services.project_service import load_project_metadata
+
+    existing = load_project_metadata(video_id)
+    if existing and existing.get("owner_id") != owner_id:
+        raise ValueError("Project not found.")
+    if existing and existing.get("source_storage_key") not in {None, source_storage_key}:
+        raise ValueError("The project already has a different source video.")
+
+    def load_stored_source() -> dict[str, Any]:
+        destination = PROCESSING_TEMP_DIR / "uploads" / "processing" / video_id / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            storage.download_file(source_storage_key, destination)
+            if not destination.is_file() or destination.stat().st_size != size_bytes:
+                raise StorageError("Uploaded source could not be restored from object storage.")
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        return {
+            "video_id": video_id,
+            "title": filename,
+            "filepath": str(destination),
+            "cached": False,
+            "temporary": True,
+        }
+
+    return _start_source_analysis(
+        video_id,
+        url=None,
+        title=filename,
+        owner_id=owner_id,
+        source_loader=load_stored_source,
+        existing=existing,
+        source_storage_key=source_storage_key,
+        reuse_completed=False,
     )

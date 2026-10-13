@@ -4,7 +4,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 try:
     from botocore.exceptions import BotoCoreError, ClientError
@@ -68,6 +68,24 @@ class StorageBackend:
 
     def presign(self, key: str, expires: int = 300) -> str | None:
         return None
+
+    def presign_put(self, key: str, content_type: str, expires: int = 300) -> str:
+        raise StorageError("Direct uploads are not supported by this storage backend.")
+
+    def create_multipart_upload(self, key: str, content_type: str) -> str:
+        raise StorageError("Multipart uploads are not supported by this storage backend.")
+
+    def presign_upload_part(self, key: str, upload_id: str, part_number: int, expires: int = 300) -> str:
+        raise StorageError("Multipart uploads are not supported by this storage backend.")
+
+    def complete_multipart_upload(self, key: str, upload_id: str, parts: list[dict[str, Any]]) -> None:
+        raise StorageError("Multipart uploads are not supported by this storage backend.")
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        raise StorageError("Multipart uploads are not supported by this storage backend.")
+
+    def object_metadata(self, key: str) -> dict[str, Any]:
+        raise StorageError("Object metadata is not supported by this storage backend.")
 
     def list_keys(self, prefix: str) -> Iterable[str]:
         return ()
@@ -182,6 +200,75 @@ class S3Storage(StorageBackend):
         return self.client.generate_presigned_url(
             "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires
         )
+
+    def presign_put(self, key: str, content_type: str, expires: int = 300) -> str:
+        try:
+            return self.client.generate_presigned_url(
+                "put_object",
+                Params={"Bucket": self.bucket, "Key": key, "ContentType": content_type},
+                ExpiresIn=expires,
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError("Unable to create a direct upload URL.") from exc
+
+    def create_multipart_upload(self, key: str, content_type: str) -> str:
+        try:
+            response = self.client.create_multipart_upload(
+                Bucket=self.bucket, Key=key, ContentType=content_type
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError("Unable to start a multipart upload.") from exc
+        upload_id = response.get("UploadId")
+        if not isinstance(upload_id, str) or not upload_id:
+            raise StorageError("Object storage did not return a multipart upload ID.")
+        return upload_id
+
+    def presign_upload_part(self, key: str, upload_id: str, part_number: int, expires: int = 300) -> str:
+        try:
+            return self.client.generate_presigned_url(
+                "upload_part",
+                Params={
+                    "Bucket": self.bucket,
+                    "Key": key,
+                    "UploadId": upload_id,
+                    "PartNumber": part_number,
+                },
+                ExpiresIn=expires,
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError("Unable to create a multipart upload URL.") from exc
+
+    def complete_multipart_upload(self, key: str, upload_id: str, parts: list[dict[str, Any]]) -> None:
+        try:
+            self.client.complete_multipart_upload(
+                Bucket=self.bucket,
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError("Unable to complete the multipart upload.") from exc
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        try:
+            self.client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in {"404", "NoSuchUpload", "NotFound"}:
+                return
+            raise StorageError("Unable to cancel the multipart upload.") from exc
+        except BotoCoreError as exc:
+            raise StorageError("Unable to cancel the multipart upload.") from exc
+
+    def object_metadata(self, key: str) -> dict[str, Any]:
+        try:
+            response = self.client.head_object(Bucket=self.bucket, Key=key)
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError("Object storage metadata lookup failed.") from exc
+        return {
+            "size": int(response["ContentLength"]) if response.get("ContentLength") is not None else None,
+            "content_type": response.get("ContentType"),
+        }
 
     def list_keys(self, prefix: str) -> Iterable[str]:
         try:
