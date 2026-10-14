@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BatchResponse, Candidate, CaptionPreset, ProjectSummary, ProjectMusicAsset } from '../api/types';
@@ -114,7 +114,10 @@ async function openTools() {
   await screen.findByRole('heading', { name: 'Batch Clips' });
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe('ProjectWorkspacePage tools', () => {
   beforeEach(() => {
@@ -227,6 +230,38 @@ describe('ProjectWorkspacePage tools', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh status' }));
     expect(await screen.findByText(/Completed · 0% · 0\/0 clips completed/)).toBeTruthy();
     expect(screen.queryByText(/Could not refresh batch status/)).toBeNull();
+  });
+
+  it('keeps analysis running through an HTML gateway error and recovers on the next poll', async () => {
+    vi.useFakeTimers();
+    const temporaryError = Object.assign(
+      new Error('The server is temporarily unavailable (HTTP 502). Retrying automatically.'),
+      { retryable: true },
+    );
+    api.getProject
+      .mockResolvedValueOnce({ ...project, status: 'running', candidate_count: 0 })
+      .mockRejectedValueOnce(temporaryError)
+      .mockResolvedValueOnce({ ...project, status: 'completed', candidate_count: 0 });
+    renderWorkspace();
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('heading', { name: 'Test project' })).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(screen.getByText(/temporarily unavailable \(HTTP 502\)/)).toBeTruthy();
+    expect(screen.getByText('Analyzing video...')).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.getProject).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText(/temporarily unavailable \(HTTP 502\)/)).toBeNull();
+    expect(screen.queryByText('Analyzing video...')).toBeNull();
+    vi.useRealTimers();
   });
 
   it('cleans up the single batch polling interval when the workspace unmounts', async () => {

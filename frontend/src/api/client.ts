@@ -24,6 +24,41 @@ export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? window.location.origin : 'http://127.0.0.1:8000');
 export type AuthUser = { id: string; username: string };
 
+const RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+export class ApiRequestError extends Error {
+  readonly retryable: boolean;
+
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.retryable = RETRYABLE_HTTP_STATUSES.has(status);
+  }
+}
+
+function responseErrorMessage(status: number, body: string, contentType: string): string {
+  if (RETRYABLE_HTTP_STATUSES.has(status)) {
+    return `The server is temporarily unavailable (HTTP ${status}). Retrying automatically.`;
+  }
+
+  const looksLikeHtml = contentType.includes('text/html')
+    || /^\s*(?:<!doctype\b|<!--|<\?xml\b|<\/?[a-z][a-z0-9:-]*(?:\s[^<>]*?)?\/?>)/i.test(body);
+  if (looksLikeHtml) {
+    return `The server returned an unreadable error (HTTP ${status}).`;
+  }
+
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown };
+    if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
+      return parsed.detail.slice(0, 500);
+    }
+  } catch {
+    // Non-JSON error bodies are handled as bounded plain text below.
+  }
+
+  return body.trim().slice(0, 500) || `Request failed with status ${status}.`;
+}
+
 export function resolveMediaUrl(path?: string | null): string | null {
   if (!path) {
     return null;
@@ -43,22 +78,24 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
 
-  const text = await response.text();
   if (!response.ok) {
     if (response.status === 401 && path !== '/api/auth/login') {
       window.dispatchEvent(new Event('clippy:unauthorized'));
     }
-    let message = text;
-    try {
-      const parsed = JSON.parse(text) as { detail?: string };
-      message = parsed.detail ?? message;
-    } catch {
-      // Ignore JSON parse errors and surface the raw message.
+    if (RETRYABLE_HTTP_STATUSES.has(response.status)) {
+      throw new ApiRequestError(
+        responseErrorMessage(response.status, '', response.headers.get('Content-Type') ?? ''),
+        response.status,
+      );
     }
-
-    throw new Error(message || `Request failed with status ${response.status}`);
+    const text = await response.text();
+    throw new ApiRequestError(
+      responseErrorMessage(response.status, text, response.headers.get('Content-Type') ?? ''),
+      response.status,
+    );
   }
 
+  const text = await response.text();
   if (!text) {
     return undefined as T;
   }

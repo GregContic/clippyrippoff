@@ -8,6 +8,7 @@ from pathlib import Path
 
 from backend.core import PROJECT_ROOT  # noqa: F401 - ensures scripts/ is on sys.path
 from backend.services.job_registry import job_registry
+from backend.services.media_concurrency import run_media_task
 from backend.services.project_service import (
     get_candidate_editor_state,
     load_candidates,
@@ -385,7 +386,7 @@ def submit_renders(
                     except FileNotFoundError:
                         pass
 
-        thread = threading.Thread(target=_runner, args=(record.id,), daemon=True)
+        thread = threading.Thread(target=run_media_task, args=(_runner, record.id), daemon=True)
         thread.start()
         job_ids.append(record.id)
     return job_ids

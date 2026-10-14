@@ -6,13 +6,13 @@ const steps = [
   { key: 'downloading', label: 'Downloading' },
   { key: 'uploading', label: 'Uploading' },
   { key: 'transcribing', label: 'Transcribing' },
-  { key: 'detecting', label: 'Detecting Highlights' },
-  { key: 'ranking', label: 'Detecting Highlights' },
+  { key: 'detecting', label: 'Detecting & Ranking Highlights' },
   { key: 'complete', label: 'Completed' },
 ];
 
 export function AnalysisProgress({ stage, message, status }: { stage?: string | null; message?: string | null; status: string }) {
-  const currentIndex = Math.max(0, steps.findIndex((step) => step.key === stage));
+  const normalizedStage = stage === 'ranking' ? 'detecting' : stage;
+  const currentIndex = Math.max(0, steps.findIndex((step) => step.key === normalizedStage));
   const failed = status === 'failed';
 
   return (
@@ -30,8 +30,8 @@ export function AnalysisProgress({ stage, message, status }: { stage?: string | 
       {!failed ? (
         <div className="mt-5 space-y-3">
           {steps.map((step, index) => {
-            const isComplete = index < currentIndex || stage === 'complete';
-            const isActive = index === currentIndex && stage !== 'complete';
+            const isComplete = index < currentIndex || normalizedStage === 'complete';
+            const isActive = index === currentIndex && normalizedStage !== 'complete';
             return (
               <div key={step.key} className="flex items-center gap-3">
                 <div className={`h-2.5 w-2.5 rounded-full ${isComplete ? 'bg-accent-400' : isActive ? 'bg-accent-300' : 'bg-slate-600'}`} />

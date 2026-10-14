@@ -37,6 +37,7 @@ from scripts.utils import FFmpegNotFoundError, PROCESSING_TEMP_DIR, Transcriptio
 from backend.services.storage import storage
 from backend.services.storage import StorageError
 from backend.services.ingestion import YouTubeProvider
+from backend.services.media_concurrency import run_media_task
 
 _LOGGER = logging.getLogger(__name__)
 _ANALYSIS_START_LOCK = threading.Lock()
@@ -249,7 +250,7 @@ def _start_source_analysis(
 
             job_registry.update(job_id, stage="detecting", message="Detecting Highlights")
             patch_project_metadata(video_id_local, status="running", analysis_stage="detecting", message="Detecting Highlights")
-            candidates = detect_candidates(source_path, config, paths["transcript"])
+            candidates = run_media_task(detect_candidates, source_path, config, paths["transcript"])
             job_registry.update(job_id, stage="ranking", message="Detecting Highlights")
             patch_project_metadata(video_id_local, status="running", analysis_stage="ranking", message="Detecting Highlights")
             candidate_payload = {

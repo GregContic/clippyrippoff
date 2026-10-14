@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.services.job_registry import job_registry
+from backend.services.media_concurrency import run_media_task
 from backend.services.project_service import (
     find_compilation as find_persisted_compilation,
     get_candidate_editor_state,
@@ -631,7 +632,7 @@ def create_compilation(
             except OSError:
                 logger.exception("Could not remove compilation temporary files %s", temp_dir)
 
-    thread = threading.Thread(target=_runner, daemon=True)
+    thread = threading.Thread(target=run_media_task, args=(_runner,), daemon=True)
     thread.start()
     return get_compilation(compilation_id, owner_id=owner_id) or _compilation_view(record, parent)
 

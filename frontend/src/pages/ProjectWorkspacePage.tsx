@@ -52,6 +52,7 @@ export function ProjectWorkspacePage() {
   const [sourceDuration, setSourceDuration] = useState<number | null>(null);
   const [transcriptUrl, setTranscriptUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [workspaceRetryable, setWorkspaceRetryable] = useState(false);
   const [rendering, setRendering] = useState(false);
   const [busyAction, setBusyAction] = useState<'analyze' | 'refresh' | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
@@ -88,8 +89,14 @@ export function ProjectWorkspacePage() {
   const [crossfadeDuration, setCrossfadeDuration] = useState('0.5');
   const batchRequestInFlight = useRef(false);
   const batchRefreshRef = useRef<() => void>(() => undefined);
+  const workspaceLoadInFlight = useRef(false);
+  const workspaceRetryCount = useRef(0);
 
-  async function loadWorkspace() {
+  async function loadWorkspace(): Promise<boolean> {
+    if (workspaceLoadInFlight.current) {
+      return false;
+    }
+    workspaceLoadInFlight.current = true;
     try {
       const [summary, renderResponse, fileResponse] = await Promise.all([
         getProject(videoId),
@@ -101,6 +108,8 @@ export function ProjectWorkspacePage() {
       setRenderJobs(renderResponse);
       setProjectFiles(fileResponse.items);
       setError(null);
+      setWorkspaceRetryable(false);
+      workspaceRetryCount.current = 0;
       if (summary.status === 'completed' && summary.candidate_count > 0) {
         const candidateResponse = await getCandidates(videoId);
         setCandidates(candidateResponse.candidates);
@@ -109,8 +118,16 @@ export function ProjectWorkspacePage() {
         setCandidates([]);
         setSourceDuration(summary.source_duration ?? null);
       }
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to load project workspace.');
+      const retryable = cause instanceof Error
+        && 'retryable' in cause
+        && cause.retryable === true;
+      setWorkspaceRetryable(retryable);
+      return false;
+    } finally {
+      workspaceLoadInFlight.current = false;
     }
   }
 
@@ -121,6 +138,8 @@ export function ProjectWorkspacePage() {
     setBatch(null);
     setBatchPollingError(null);
     setCompilation(null);
+    setWorkspaceRetryable(false);
+    workspaceRetryCount.current = 0;
     let active = true;
     void loadWorkspace().then(() => {
       if (!active) {
@@ -133,22 +152,40 @@ export function ProjectWorkspacePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoId]);
 
+  const projectIsActive = Boolean(project && ['queued', 'running'].includes(project.status));
+  const retryAfterError = workspaceRetryable && !projectIsActive;
+
   useEffect(() => {
-    if (!project || !['queued', 'running'].includes(project.status)) {
+    const shouldPoll = projectIsActive || retryAfterError;
+    if (!shouldPoll) {
       return undefined;
     }
     let active = true;
-    const interval = window.setInterval(() => {
-      if (active) {
-        void loadWorkspace();
+    let timeout: number | undefined;
+    const poll = async () => {
+      const succeeded = await loadWorkspace();
+      if (!active) {
+        return;
       }
-    }, 3000);
+      if (succeeded) {
+        workspaceRetryCount.current = 0;
+      } else {
+        workspaceRetryCount.current += 1;
+      }
+      const delay = succeeded
+        ? 3000
+        : Math.min(3000 * (2 ** Math.max(0, workspaceRetryCount.current - 1)), 30000);
+      timeout = window.setTimeout(() => void poll(), delay);
+    };
+    timeout = window.setTimeout(() => void poll(), 3000);
     return () => {
       active = false;
-      window.clearInterval(interval);
+      if (timeout !== undefined) {
+        window.clearTimeout(timeout);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoId, project?.status]);
+  }, [videoId, project?.status, retryAfterError]);
 
   useEffect(() => {
     let active = true;
@@ -483,7 +520,11 @@ export function ProjectWorkspacePage() {
   const queuedRenderJobs = renderJobs.filter((job) => job.status === 'queued' || job.status === 'running');
 
   if (!project) {
-    return <Card className="p-6 text-sm text-slate-400">Loading project workspace...</Card>;
+    return (
+      <Card className="p-6 text-sm text-slate-400" role={error ? 'alert' : undefined}>
+        {error ?? 'Loading project workspace...'}
+      </Card>
+    );
   }
 
   return (
