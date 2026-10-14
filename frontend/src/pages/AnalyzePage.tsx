@@ -168,7 +168,7 @@ export function AnalyzePage() {
 								onUpload={handleUpload}
 								loading={loading}
 								busyLabel={uploading ? (transferComplete ? 'Starting analysis...' : 'Uploading...') : 'Analyzing...'}
-								uploadDisabled={!uploadConfig || (import.meta.env.PROD && !uploadConfig.direct_upload)}
+								uploadDisabled={import.meta.env.PROD && uploadConfig !== null && !uploadConfig.direct_upload}
 								uploadAccept={uploadConfig?.allowed_extensions.join(',')}
 							/>
 							{uploadConfig ? (

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 
 from backend.schemas import (
     AnalyzeRequest,
@@ -109,12 +109,13 @@ def finish_upload(upload_id: str, body: UploadCompleteRequest, request: Request)
         raise _upload_error(exc) from exc
 
 
-@router.delete("/uploads/{upload_id}", status_code=204)
-def remove_upload(upload_id: str, request: Request) -> None:
+@router.delete("/uploads/{upload_id}", status_code=204, response_class=Response)
+def remove_upload(upload_id: str, request: Request) -> Response:
     try:
         cancel_upload(upload_id, request.state.user.id)
     except UploadServiceError as exc:
         raise _upload_error(exc) from exc
+    return Response(status_code=204)
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)

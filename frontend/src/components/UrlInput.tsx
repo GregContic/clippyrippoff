@@ -1,4 +1,4 @@
-import type { FormEvent } from 'react';
+import { useRef, type FormEvent } from 'react';
 import { Button, Input } from './ui';
 
 export function UrlInput({
@@ -20,6 +20,8 @@ export function UrlInput({
   uploadAccept?: string;
   busyLabel?: string;
 }) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     onSubmit();
@@ -37,12 +39,22 @@ export function UrlInput({
         {loading ? busyLabel ?? 'Analyzing...' : 'Analyze Video →'}
       </Button>
       {onUpload ? (
-        <label className="inline-flex min-h-12 cursor-pointer items-center justify-center rounded-xl border border-surface-600 px-4 text-sm text-slate-200 hover:border-accent-500/40">
-          Upload video
+        <>
+          <Button
+            type="button"
+            disabled={loading || uploadDisabled}
+            onClick={() => fileInputRef.current?.click()}
+            className="min-h-12 border-surface-600 bg-surface-800 px-4 text-slate-200 hover:border-accent-500/40 hover:bg-surface-700"
+          >
+            Upload video
+          </Button>
           <input
+            ref={fileInputRef}
             type="file"
             accept={uploadAccept ?? 'video/*,.mkv,.avi,.mov,.webm,.m4v'}
+            aria-label="Select a video file"
             className="sr-only"
+            tabIndex={-1}
             disabled={loading || uploadDisabled}
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -50,7 +62,7 @@ export function UrlInput({
               event.currentTarget.value = '';
             }}
           />
-        </label>
+        </>
       ) : null}
     </form>
   );

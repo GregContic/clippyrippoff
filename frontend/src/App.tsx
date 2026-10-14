@@ -1,4 +1,4 @@
-import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { useAuth } from './auth';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
@@ -63,6 +63,21 @@ function PublicLanding() {
   );
 }
 
+function LegacyProjectRedirect() {
+  const { videoId = '' } = useParams();
+  const location = useLocation();
+  return (
+    <Navigate
+      to={{
+        pathname: `/projects/${encodeURIComponent(videoId)}`,
+        search: location.search,
+        hash: location.hash,
+      }}
+      replace
+    />
+  );
+}
+
 export function App() {
   const { user, loading, logout } = useAuth();
   const location = useLocation();
@@ -98,7 +113,7 @@ export function App() {
                 <Route path="/projects" element={<ProjectsPage />} />
                 <Route path="/projects/:videoId" element={<ProjectWorkspacePage />} />
                 <Route path="/analyze" element={<AnalyzePage />} />
-                <Route path="/analyze/:videoId" element={<AnalyzePage />} />
+                <Route path="/analyze/:videoId" element={<LegacyProjectRedirect />} />
                 <Route path="/renders" element={<RendersPage />} />
                 <Route path="/library" element={<LibraryPage />} />
                 <Route path="/settings" element={<SettingsPage />} />

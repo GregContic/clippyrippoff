@@ -212,6 +212,9 @@ export async function uploadVideo(
     throw new Error(`Unsupported video format. Accepted formats: ${config.allowed_extensions.join(', ')}.`);
   }
   if (!config.direct_upload) {
+    if (import.meta.env.PROD) {
+      throw new Error('Direct R2 uploads are unavailable. The video was not sent through the backend; check upload configuration and retry.');
+    }
     return xhrMultipartUpload(file, signal, onProgress);
   }
 

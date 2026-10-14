@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   analyzeVideo,
@@ -21,6 +21,7 @@ import {
 } from '../api/client';
 import type { BatchResponse, Candidate, CandidateEditorState, CaptionPreset, CompilationResponse, EditingSettings, ProjectFileItem, ProjectMusicAsset, ProjectSummary, RenderJob, ZoomInterval } from '../api/types';
 import { AnalysisProgress } from '../components/AnalysisProgress';
+import { BatchProgress } from '../components/BatchProgress';
 import { CandidateEditorModal } from '../components/CandidateEditorModal';
 import { CandidateGrid } from '../components/CandidateGrid';
 import { PreviewModal } from '../components/PreviewModal';
@@ -28,11 +29,12 @@ import { RenderQueue } from '../components/RenderQueue';
 import { Button, Card, EmptyState } from '../components/ui';
 import { formatBytes, formatDate, formatDuration } from '../lib/format';
 
-type TabKey = 'overview' | 'candidates' | 'renders' | 'files';
+type TabKey = 'overview' | 'candidates' | 'tools' | 'renders' | 'files';
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: 'overview', label: 'Overview' },
   { key: 'candidates', label: 'Candidates' },
+  { key: 'tools', label: 'Create & Edit' },
   { key: 'renders', label: 'Renders' },
   { key: 'files', label: 'Files' },
 ];
@@ -57,6 +59,7 @@ export function ProjectWorkspacePage() {
   const [candidateDurationMin, setCandidateDurationMin] = useState('');
   const [candidateRenderStatus, setCandidateRenderStatus] = useState('all');
   const [batch, setBatch] = useState<BatchResponse | null>(null);
+  const [batchPollingError, setBatchPollingError] = useState<string | null>(null);
   const [batchTargetDuration, setBatchTargetDuration] = useState('30');
   const [batchSpacing, setBatchSpacing] = useState('5');
   const [batchMaxClips, setBatchMaxClips] = useState('');
@@ -83,6 +86,8 @@ export function ProjectWorkspacePage() {
   const [musicUploading, setMusicUploading] = useState(false);
   const [crossfadeEnabled, setCrossfadeEnabled] = useState(false);
   const [crossfadeDuration, setCrossfadeDuration] = useState('0.5');
+  const batchRequestInFlight = useRef(false);
+  const batchRefreshRef = useRef<() => void>(() => undefined);
 
   async function loadWorkspace() {
     try {
@@ -110,6 +115,12 @@ export function ProjectWorkspacePage() {
   }
 
   useEffect(() => {
+    setProject(null);
+    setCandidates([]);
+    setSelectedIds([]);
+    setBatch(null);
+    setBatchPollingError(null);
+    setCompilation(null);
     let active = true;
     void loadWorkspace().then(() => {
       if (!active) {
@@ -159,23 +170,40 @@ export function ProjectWorkspacePage() {
   }, [videoId]);
 
   useEffect(() => {
-    if (!batch?.batch_id) {
+    if (!batch?.batch_id || !['queued', 'running'].includes(batch.status)) {
+      batchRefreshRef.current = () => undefined;
       return undefined;
     }
     let active = true;
     const refresh = () => {
+      if (batchRequestInFlight.current) {
+        return;
+      }
+      batchRequestInFlight.current = true;
       void getBatch(batch.batch_id).then((next) => {
         if (active) {
           setBatch(next);
+          setBatchPollingError(null);
         }
-      }).catch(() => undefined);
+      }).catch((cause: unknown) => {
+        if (active) {
+          setBatchPollingError(cause instanceof Error ? cause.message : 'Unable to refresh batch status.');
+        }
+      }).finally(() => {
+        batchRequestInFlight.current = false;
+      });
     };
+    batchRefreshRef.current = refresh;
+    void refresh();
     const interval = window.setInterval(refresh, 2000);
     return () => {
       active = false;
       window.clearInterval(interval);
+      if (batchRefreshRef.current === refresh) {
+        batchRefreshRef.current = () => undefined;
+      }
     };
-  }, [batch?.batch_id]);
+  }, [batch?.batch_id, batch?.status, videoId]);
 
   useEffect(() => {
     if (!compilation?.compilation_id || !['queued', 'running'].includes(compilation.status)) {
@@ -517,13 +545,19 @@ export function ProjectWorkspacePage() {
 
       {error ? <Card className="border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-100">{error}</Card> : null}
 
-      <div className="flex flex-wrap gap-2">
+      <nav aria-label="Project workspace sections" className="flex flex-wrap gap-2">
         {tabs.map((tab) => (
-          <Button key={tab.key} type="button" variant={activeTab === tab.key ? 'primary' : 'secondary'} onClick={() => setActiveTab(tab.key)}>
+          <Button
+            key={tab.key}
+            type="button"
+            variant={activeTab === tab.key ? 'primary' : 'secondary'}
+            aria-pressed={activeTab === tab.key}
+            onClick={() => setActiveTab(tab.key)}
+          >
             {tab.label}
           </Button>
         ))}
-      </div>
+      </nav>
 
       {activeTab === 'overview' ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -538,8 +572,10 @@ export function ProjectWorkspacePage() {
         </div>
       ) : null}
 
-      {activeTab === 'candidates' ? (
+      {activeTab === 'candidates' || activeTab === 'tools' ? (
         <div className="space-y-4">
+          {activeTab === 'candidates' ? (
+            <>
           <Card className="grid gap-3 p-4 md:grid-cols-4">
             <label className="space-y-1 text-sm text-slate-300">
               <span className="text-xs uppercase tracking-[0.22em] text-slate-500">Min score</span>
@@ -566,7 +602,29 @@ export function ProjectWorkspacePage() {
               <Button type="button" onClick={() => setSelectedIds(filteredCandidates.map((candidate) => candidate.id))} disabled={!filteredCandidates.length}>Select filtered</Button>
             </div>
           </Card>
-          <Card className="space-y-4 p-4">
+            </>
+          ) : null}
+          {activeTab === 'tools' ? (
+            <>
+              <nav aria-label="Create and edit tools" className="flex flex-wrap gap-2 rounded-xl border border-surface-700 bg-surface-900 p-3">
+                <a href="#batch-clips" className="rounded-lg px-3 py-2 text-sm text-slate-200 underline-offset-4 hover:bg-surface-800 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400">Batch Clips</a>
+                <a href="#auto-compilation" className="rounded-lg px-3 py-2 text-sm text-slate-200 underline-offset-4 hover:bg-surface-800 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400">Auto-Compilation</a>
+                <a href="#smart-editing" className="rounded-lg px-3 py-2 text-sm text-slate-200 underline-offset-4 hover:bg-surface-800 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400">Smart Editing</a>
+              </nav>
+              {project.status !== 'completed' || candidates.length === 0 ? (
+                <Card className="border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100" role="status">
+                  {project.status !== 'completed'
+                    ? `Batch Clips and Auto-Compilation are unavailable until analysis completes (current status: ${project.status}).`
+                    : project.candidate_count > 0
+                      ? 'Analysis has candidates, but they are not available in this view yet. Check the workspace error above or refresh the project.'
+                      : 'Analysis completed without candidates. Re-analyze the source or choose a project with detected moments to use Batch Clips and Auto-Compilation.'}
+                </Card>
+              ) : null}
+            </>
+          ) : null}
+          {activeTab === 'tools' ? (
+            <>
+          <Card id="smart-editing" className="scroll-mt-6 space-y-4 p-4">
             <div>
               <h3 className="text-lg font-semibold text-white">Smart Editing</h3>
               <p className="mt-1 text-sm text-slate-400">Optional hook, bounded punch-ins, project-owned music, and a reusable caption style. These settings apply to individual renders and batch children; transitions apply only to compilations.</p>
@@ -636,7 +694,7 @@ export function ProjectWorkspacePage() {
               </div>
             </div>
           </Card>
-          <Card className="space-y-4 p-4">
+          <Card id="auto-compilation" className="scroll-mt-6 space-y-4 p-4">
             <div>
               <h3 className="text-lg font-semibold text-white">Auto-Compilation</h3>
               <p className="mt-1 text-sm text-slate-400">Compiles selected moments as hard cuts in the order shown. If the preferred maximum is exceeded, only the final moment is shortened, and only when it remains renderable.</p>
@@ -682,7 +740,7 @@ export function ProjectWorkspacePage() {
               </ol>
             ) : <p className="text-sm text-slate-500">Select moments below to build an ordered compilation.</p>}
             <div className="flex flex-wrap items-center gap-3">
-              <Button type="button" onClick={() => void startCompilation()} disabled={compilationBusy || !compilationSegments.length || compilationSegments.length > 50}>
+              <Button type="button" onClick={() => void startCompilation()} disabled={compilationBusy || project.status !== 'completed' || !candidates.length || !compilationSegments.length || compilationSegments.length > 50}>
                 {compilationBusy ? 'Starting...' : 'Create compilation'}
               </Button>
               {compilationSegments.length > 50 ? <span className="text-xs text-amber-300">Select at most 50 moments.</span> : null}
@@ -697,7 +755,7 @@ export function ProjectWorkspacePage() {
               </div>
             ) : null}
           </Card>
-          <Card className="space-y-4 p-4">
+          <Card id="batch-clips" className="scroll-mt-6 space-y-4 p-4">
             <div>
               <h3 className="text-lg font-semibold text-white">Batch Clips</h3>
               <p className="mt-1 text-sm text-slate-400">Selects the highest-scoring distinct moments, trims each to at most the target duration, and renders independent vertical clips.</p>
@@ -709,32 +767,48 @@ export function ProjectWorkspacePage() {
               <label className="flex items-end gap-2 pb-2 text-sm text-slate-300"><input checked={batchCaptions} onChange={(event) => setBatchCaptions(event.target.checked)} type="checkbox" /> Captions</label>
             </div>
             <div className="flex flex-wrap items-center gap-3">
-              <Button type="button" onClick={() => void startBatch()} disabled={batchBusy || rendering || !candidates.length}>{batchBusy ? 'Starting...' : `Generate batch${selectedIds.length ? ` (${selectedIds.length} selected)` : ''}`}</Button>
-              {batch ? <span className="text-sm text-slate-400">{batch.status} · {Math.round(batch.percent)}% · {batch.children.filter((child) => child.status === 'completed').length}/{batch.children.length} completed</span> : null}
+              <Button type="button" onClick={() => void startBatch()} disabled={batchBusy || rendering || project.status !== 'completed' || !candidates.length}>{batchBusy ? 'Starting...' : `Generate batch${selectedIds.length ? ` (${selectedIds.length} selected)` : ''}`}</Button>
             </div>
-            {batch?.children.length ? <div className="grid gap-2 sm:grid-cols-2">{batch.children.map((child) => <div key={child.job_id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-sm"><div className="flex justify-between text-slate-300"><span>Candidate #{child.candidate_id ?? '?'}</span><span>{child.status} · {Math.round(child.percent)}%</span></div>{child.output_url ? <a className="mt-2 inline-block text-sky-300 hover:text-sky-200" href={resolveMediaUrl(child.output_url) ?? child.output_url} target="_blank" rel="noreferrer">Open clip</a> : null}{child.error ? <div className="mt-1 text-danger-100">{child.error}</div> : null}</div>)}</div> : null}
+            {batch ? (
+              <BatchProgress
+                batch={batch}
+                pollingError={batchPollingError}
+                onRetryPolling={['queued', 'running'].includes(batch.status) ? () => batchRefreshRef.current() : undefined}
+              />
+            ) : null}
           </Card>
-          {candidates.length ? (
-            <CandidateGrid
-              candidates={filteredCandidates}
-              selectedIds={selectedIds}
-              onToggle={toggleCandidate}
-              onSelectAll={selectAll}
-              onClear={clearSelection}
-              onPreview={(candidate) => setActiveCandidate(candidate)}
-              onEdit={(candidate) => setEditingCandidate(candidate)}
-              onRender={renderSelected}
-              busy={rendering}
-              renderStatusById={renderStatusByCandidateId}
-            />
-          ) : (
-            <EmptyState title="No candidates available" description="This project has not produced candidates yet or analysis is still running." />
-          )}
+            </>
+          ) : null}
+          {activeTab === 'candidates' ? (
+            candidates.length ? (
+              <CandidateGrid
+                candidates={filteredCandidates}
+                selectedIds={selectedIds}
+                onToggle={toggleCandidate}
+                onSelectAll={selectAll}
+                onClear={clearSelection}
+                onPreview={(candidate) => setActiveCandidate(candidate)}
+                onEdit={(candidate) => setEditingCandidate(candidate)}
+                onRender={renderSelected}
+                busy={rendering}
+                renderStatusById={renderStatusByCandidateId}
+              />
+            ) : (
+              <EmptyState title="No candidates available" description="This project has not produced candidates yet or analysis is still running." />
+            )
+          ) : null}
         </div>
       ) : null}
 
       {activeTab === 'renders' ? (
         <div className="space-y-4">
+          {batch ? (
+            <BatchProgress
+              batch={batch}
+              pollingError={batchPollingError}
+              onRetryPolling={['queued', 'running'].includes(batch.status) ? () => batchRefreshRef.current() : undefined}
+            />
+          ) : null}
           <RenderQueue
             jobs={renderJobs.filter((job) => job.video_id === project.video_id)}
             onNeedsChanges={(job) => {
